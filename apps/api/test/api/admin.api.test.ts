@@ -61,7 +61,7 @@ describe("admin user & permission management (real services; AUTHZ_MATRIX §B)",
   beforeAll(async () => {
     const cfg = loadConfig(process.env);
     pgPool = createPgPool({ connectionString: appConnectionString() });
-    redis = createRedisClient({ url: process.env.REDIS_URL ?? "", lazyConnect: false });
+    redis = createRedisClient({ url: envOrThrow("REDIS_URL") + "/3", lazyConnect: false });
     app = buildApp({ config: cfg, pgPool, redis, prisma: prismaClient() });
 
     const conn = await independentConnection(appConnectionString());
