@@ -1,0 +1,122 @@
+# LedgerLine — project-specific Git ignore rules
+# Stack: Node.js 22 + TypeScript monorepo, Next.js, Fastify, PostgreSQL,
+# node-pg-migrate, Vitest, Playwright, Docker Compose.
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.test.example
+!.env.production.example
+
+# Private keys, certificates, credentials and local secret stores
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets/
+.secret/
+.credentials/
+
+# Node.js / package-manager artifacts
+node_modules/
+**/node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/install-state.gz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# TypeScript / build output
+dist/
+**/dist/
+build/
+**/build/
+*.tsbuildinfo
+
+# Next.js
+.next/
+**/.next/
+out/
+**/out/
+
+# Tests, coverage and browser-test artifacts
+coverage/
+**/coverage/
+.nyc_output/
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+
+# Runtime logs, temporary files and process state
+logs/
+*.log
+*.pid
+*.pid.lock
+pids/
+*.seed
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# Local databases and generated database state
+# Keep schema drafts and versioned migrations in Git.
+*.sqlite
+*.sqlite3
+*.db
+pgdata/
+postgres-data/
+postgres-data-*/
+database-data/
+db-data/
+*.dump
+*.backup
+
+# Docker local overrides and generated state
+# Keep Dockerfile, compose.yaml, docker-compose.yml and checked-in config.
+docker-compose.override.yml
+compose.override.yaml
+compose.override.yml
+.docker/
+
+# Tool caches
+.cache/
+.parcel-cache/
+.turbo/
+.eslintcache
+.stylelintcache
+.vite/
+*.swp
+*.swo
+
+# Operating systems and editors
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+
+# Local scratch / generated artifacts
+*.bak
+*.orig
+*.rej
+*.local
+scratch/
+artifacts/
+
+# Prisma generated client output (PHASE-04 P4.3+; PRISMA-001 rebuilds it)
+apps/api/src/generated/

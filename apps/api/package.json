@@ -1,0 +1,37 @@
+{
+  "name": "@balancevault/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node --env-file=../../.env --watch --import tsx src/server.ts",
+    "start": "node --env-file=./.env dist/src/server.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src test scripts --no-error-on-unmatched-pattern",
+    "test": "vitest run",
+    "migrate:bootstrap": "node scripts/migrate.mjs --bootstrap",
+    "migrate": "node scripts/migrate.mjs",
+    "prisma:generate": "prisma generate",
+    "generate": "prisma generate"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.7.0",
+    "dotenv": "^16.5.0",
+    "fastify": "^5.3.0",
+    "ioredis": "^5.6.0",
+    "pg": "^8.16.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.15.0",
+    "eslint": "^9.28.0",
+    "node-pg-migrate": "^8.0.0",
+    "prisma": "^6.7.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.33.0",
+    "vitest": "^3.2.0"
+  }
+}

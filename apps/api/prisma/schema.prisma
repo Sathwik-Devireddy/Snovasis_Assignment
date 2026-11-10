@@ -1,0 +1,29 @@
+// BalanceVault — Prisma schema (PHASE-04 P4.3+).
+//
+// SINGLE MIGRATION AUTHORITY RULE (ADR-005 §5, normative): this schema MUST
+// mirror the database that node-pg-migrate produces. `prisma migrate` is never
+// used anywhere in this repository; the table list below grows only when a
+// node-pg-migrate migration lands, in the same change-set (PRISMA-001 drift
+// check fails the build otherwise).
+//
+// DATABASE_URL = the SAME runtime connection string as the raw-pg money path
+// (role `ledgerline_app`, same database) — ADR-005 §4. Prisma never connects
+// as the owner role.
+
+generator client {
+  provider = "prisma-client-js"
+  // Generated output is checked-in-code excluded (gitignored); imported by the
+  // routine-CRUD path only. Never imported by any money-path module.
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Phase 4 scaffold: the migrated database has not created tables yet
+// (PHASE-05 P5.1 creates users/sessions/account_permissions via
+// node-pg-migrate, and this schema mirrors them in that change-set).
+// The smoke test in the integration harness uses $queryRaw SELECT 1 — a
+// routine-path connectivity check, not financial access.

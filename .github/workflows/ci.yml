@@ -1,0 +1,66 @@
+name: CI
+
+# PHASE-04 P4.7 — install, lint, typecheck, migrate on a PostgreSQL service
+# container, test. node-pg-migrate is the ONLY migration authority; Prisma
+# generate runs (client build) but `prisma migrate` is never invoked.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: balancevault
+          POSTGRES_USER: balancevault_bootstrap
+          POSTGRES_PASSWORD: ci_pg_password
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U balancevault_bootstrap -d balancevault"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      NODE_ENV: test
+      PORT: "4000"
+      LOG_LEVEL: warn
+      PG_HOST_PORT: "15432"
+      REDIS_HOST_PORT: "16379"
+      DATABASE_URL: postgresql://ledgerline_app:ci_app_password@localhost:15432/balancevault
+      DATABASE_URL_OWNER: postgresql://ledgerline_owner:ci_owner_password@localhost:15432/balancevault
+      DATABASE_URL_BOOTSTRAP: postgresql://balancevault_bootstrap:ci_pg_password@localhost:15432/balancevault
+      REDIS_URL: redis://localhost:16379
+      OWNER_ROLE_PASSWORD: ci_owner_password
+      APP_ROLE_PASSWORD: ci_app_password
+      # compose bootstrap password is not needed by CI (services started directly)
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm install
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Bootstrap roles (migration 0001 as superuser)
+        run: npm run db:migrate:bootstrap
+      - name: Migrate as ledgerline_owner
+        run: npm run db:migrate
+      - name: Test (real PostgreSQL + Redis)
+        run: npm test

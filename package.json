@@ -1,0 +1,29 @@
+{
+  "name": "balancevault",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BalanceVault — double-entry ledger application (LedgerLine expanded challenge). Money path: raw PostgreSQL SQL via pg, single transaction per financial operation. Routine CRUD: Prisma. Rate limiting: Redis (availability control only).",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "postinstall": "npm run generate -w apps/api",    "lint": "npm run lint --workspaces --if-present",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "npm run typecheck -w apps/api && npm run typecheck -w apps/web",
+    "db:migrate:bootstrap": "node apps/api/scripts/migrate.mjs --bootstrap",
+    "db:migrate": "node apps/api/scripts/migrate.mjs",
+    "db:migrate:down": "node apps/api/scripts/migrate.mjs --down",
+    "db:migrate:down:bootstrap": "node apps/api/scripts/migrate.mjs --down --bootstrap",
+    "dev:api": "npm run dev -w apps/api",
+    "dev:web": "npm run dev -w apps/web",
+    "test": "npm run test -w apps/api"
+  },
+  "devDependencies": {
+    "prettier": "^3.5.0"
+  }
+}

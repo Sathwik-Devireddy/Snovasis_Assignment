@@ -1,0 +1,35 @@
+# Postgres 17 + Redis 8 (rate limiting ONLY). Loopback-only host ports so
+# neither service is reachable from another machine. Variant passwords come
+# from the project .env file (gitignored); placeholders get replaced there.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: balancevault
+      POSTGRES_USER: balancevault_bootstrap
+      POSTGRES_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD:?POSTGRES_BOOTSTRAP_PASSWORD missing from .env}
+    ports:
+      - "127.0.0.1:${PG_HOST_PORT:-15432}:5432"
+    volumes:
+      - balancevault_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U balancevault_bootstrap -d balancevault"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8-alpine
+    # Local isolated dev instance: no password, protected by the loopback-only
+    # port binding. Production supplies secured credentials/ACLs via env.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  balancevault_pgdata:
