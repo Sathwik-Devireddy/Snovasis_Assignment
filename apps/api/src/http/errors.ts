@@ -25,6 +25,7 @@ export type ErrorCode =
   | "ACCOUNT_NOT_ACTIVE"
   | "LAST_ADMIN_PROTECTED"
   | "NONZERO_BALANCE"
+  | "SELF_GRANT_REFUSED"
   // infrastructure failures (500 / 503) — retry-safe, key NOT consumed
   | "LOCK_TIMEOUT"
   | "INFRA_FAILURE";
@@ -43,6 +44,7 @@ const httpByCode: Record<ErrorCode, number> = {
   ACCOUNT_NOT_ACTIVE: 409,
   LAST_ADMIN_PROTECTED: 409,
   NONZERO_BALANCE: 409,
+  SELF_GRANT_REFUSED: 409,
   LOCK_TIMEOUT: 503,
   INFRA_FAILURE: 500,
 };

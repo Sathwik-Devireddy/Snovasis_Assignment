@@ -31,6 +31,25 @@ const envSchema = z
 
     /** Redis: rate limiting ONLY — never financial/ledger/idempotency state (THREATS T-060). */
     REDIS_URL: z.string().url().regex(/^rediss?:\/\//, "must be a redis:// URL"),
+
+    /** Session lifetime (ADR-006): opaque cookie token TTL in seconds. */
+    SESSION_TTL_SECONDS: z.coerce.number().int().positive().max(30 * 24 * 60 * 60).default(43_200),
+    /**
+     * `Secure` cookie flag (ADR-006 risk row): always true in production
+     * (enforced below — the server refuses to start otherwise); false is
+     * permitted only for plain-HTTP localhost development, that exemption is
+     * the documented ADR-006 exception.
+     */
+    COOKIE_SECURE: z.enum(["true", "false"]).default("false"),
+
+    /** Rate limits (fixed window per identity; Redis-backed, fail-soft — T-060). */
+    RATE_LIMIT_REGISTER_LIMIT: z.coerce.number().int().positive().default(10),
+    RATE_LIMIT_REGISTER_WINDOW_SECONDS: z.coerce.number().int().positive().default(3600),
+    RATE_LIMIT_LOGIN_LIMIT: z.coerce.number().int().positive().default(10),
+    RATE_LIMIT_LOGIN_WINDOW_SECONDS: z.coerce.number().int().positive().default(300),
+    /** Money endpoints (Phase 6 reuse the same limiter; configured now). */
+    RATE_LIMIT_MONEY_LIMIT: z.coerce.number().int().positive().default(60),
+    RATE_LIMIT_MONEY_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
   })
   .superRefine((env, ctx) => {
     const runtimeUser = postgresUser(env.DATABASE_URL);
@@ -40,6 +59,12 @@ const envSchema = z
         code: z.ZodIssueCode.custom,
         message:
           "DATABASE_URL and DATABASE_URL_OWNER must use different roles (ledgerline_app vs ledgerline_owner, ADR-005) — running the app as the migration role is forbidden.",
+      });
+    }
+    if (env.NODE_ENV === "production" && env.COOKIE_SECURE !== "true") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "COOKIE_SECURE must be 'true' in production (ADR-006; Secure cookies over HTTPS).",
       });
     }
   });

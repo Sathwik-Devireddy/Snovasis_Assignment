@@ -22,8 +22,75 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Phase 4 scaffold: the migrated database has not created tables yet
-// (PHASE-05 P5.1 creates users/sessions/account_permissions via
-// node-pg-migrate, and this schema mirrors them in that change-set).
-// The smoke test in the integration harness uses $queryRaw SELECT 1 — a
-// routine-path connectivity check, not financial access.
+// Phase 5 (P5.1): migration 0002_identity created users / sessions /
+// account_permissions / audit_events / admin_control via node-pg-migrate; the
+// models below mirror that migrated schema (PRISMA-001 drift assertions).
+// transaction_attempts / accounts / ledger tables are added in Phase 6.
+
+model User {
+  id           BigInt   @id @default(autoincrement()) // BIGINT GENERATED ALWAYS AS IDENTITY
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         String // ADMIN | ACCOUNT_HOLDER | AUDITOR  (CHECK users_role_enum)
+  status       String // ACTIVE | DISABLED                 (CHECK users_status_enum)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+  sessions     Session[]
+
+  @@map("users")
+}
+
+model Session {
+  id            BigInt    @id @default(autoincrement())
+  userId        BigInt    @map("user_id")
+  tokenHash     String    @unique @map("token_hash") // sha256(token); raw token never stored
+  createdAt     DateTime  @default(now()) @map("created_at")
+  expiresAt     DateTime  @map("expires_at")
+  revokedAt     DateTime? @map("revoked_at") // active iff revoked_at IS NULL AND expires_at > now()
+  userAgentHash String?   @map("user_agent_hash")
+  user          User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model AccountPermission {
+  id         BigInt    @id @default(autoincrement())
+  userId     BigInt    @map("user_id")
+  accountId  BigInt    @map("account_id") // FK → accounts added with the accounts table (Phase 6, P5.1 stub)
+  permission String // VIEW | DEPOSIT | WITHDRAW | TRANSFER | ADJUST
+  grantedBy  BigInt?   @map("granted_by")
+  grantedAt  DateTime  @default(now()) @map("granted_at")
+  revokedAt  DateTime? @map("revoked_at") // revocation keeps the row; a new grant is a new row
+
+  @@index([userId, accountId, permission])
+  @@map("account_permissions")
+}
+
+// Append-only for the runtime (INSERT-only grant; trigger guards arrive with
+// the Phase-6 append-only migration and reject UPDATE/DELETE at any privilege).
+model AuditEvent {
+  id          BigInt   @id @default(autoincrement())
+  occurredAt  DateTime @default(now()) @map("occurred_at")
+  actorId     BigInt?  @map("actor_id")
+  eventType   String   @map("event_type")
+  subjectType String?  @map("subject_type")
+  subjectId   String?  @map("subject_id")
+  reasonCode  String?  @map("reason_code")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([occurredAt, id])
+  @@index([subjectType, subjectId])
+  @@map("audit_events")
+}
+
+// Singleton serialisation row (id = 1, CHECK admin_control_singleton); the
+// last-admin guard locks it FOR UPDATE (AUTHZ_MATRIX §C.2).
+model AdminControl {
+  id        Int      @id
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("admin_control")
+}
+

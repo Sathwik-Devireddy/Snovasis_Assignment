@@ -2,11 +2,16 @@ import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { randomUUID } from "node:crypto";
+import fastifyCookie from "@fastify/cookie";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerReadyRoutes } from "./routes/ready.js";
+import { registerAuthRoutes } from "./routes/auth.js";
+import { registerRegisterRoute } from "./routes/register.js";
+import { registerAdminRoutes } from "./routes/admin.js";
 import { mapToErrorResponse } from "./errorMapper.js";
 import type { RedisLike } from "../infrastructure/redis.js";
 import type { PrismaClient } from "../infrastructure/prisma.js";
+import { buildRateLimitDepsFromEnv } from "../infrastructure/rateLimiter.js";
 import type { Config } from "../config.js";
 /**
  * Application factory (PHASE-04 P4.4): `buildApp(deps)` keeps all testable
@@ -18,7 +23,7 @@ export type AppDeps = {
   config: Config;
   pgPool: Pool;
   redis: RedisLike;
-  prisma: PrismaClient | null;
+  prisma: PrismaClient;
 };
 
 /** Never log credentials/tokens/full auth headers (LOG-001; kit P4.4). */
@@ -47,8 +52,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     requestIdHeader: false, // request ids are always server-generated
   });
 
+  app.register(fastifyCookie);
+
   app.setErrorHandler((error, request, reply) => {
-    reply.send(mapToErrorResponse(error));
+    const envelope = mapToErrorResponse(error);
+    reply.code(envelope.statusCode).send(envelope.body);
   });
 
   // Expose the server-generated request id for client-side correlation/support,
@@ -63,6 +71,18 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     pgPool: deps.pgPool,
     redis: deps.redis,
   });
+
+  // Phase 5 identity surface (P5.10/P5.11). The limiter + session deps come
+  // from typed config; Prisma is the routine-CRUD client (ADR-005).
+  const rateLimits = buildRateLimitDepsFromEnv(deps.config, deps.redis);
+  const sessions = {
+    prisma: deps.prisma,
+    sessionTtlSeconds: deps.config.SESSION_TTL_SECONDS,
+    cookieSecure: deps.config.COOKIE_SECURE === "true",
+  };
+  registerRegisterRoute(app, { prisma: deps.prisma, rateLimits });
+  registerAuthRoutes(app, { prisma: deps.prisma, sessions, rateLimits });
+  registerAdminRoutes(app, { pgPool: deps.pgPool, prisma: deps.prisma, config: deps.config });
 
   return app;
 }

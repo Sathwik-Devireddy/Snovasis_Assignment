@@ -12,11 +12,15 @@
     "test": "vitest run",
     "migrate:bootstrap": "node scripts/migrate.mjs --bootstrap",
     "migrate": "node scripts/migrate.mjs",
+    "bootstrap": "node --env-file=../../.env scripts/bootstrap.mjs",
+    "rotate-admin-credentials": "node --env-file=../../.env scripts/rotate-admin-credentials.mjs",
     "prisma:generate": "prisma generate",
     "generate": "prisma generate"
   },
   "dependencies": {
+    "@fastify/cookie": "^11.1.5",
     "@prisma/client": "^6.7.0",
+    "argon2": "^0.45.2",
     "dotenv": "^16.5.0",
     "fastify": "^5.3.0",
     "ioredis": "^5.6.0",

@@ -16,6 +16,8 @@ export interface RedisLike {
   set(key: string, value: string, mode?: string, duration?: number): Promise<unknown>;
   incr(key: string): Promise<number>;
   expire(key: string, seconds: number): Promise<number>;
+  keys(pattern: string): Promise<string[]>;
+  del(...keys: string[]): Promise<number>;
   quit(): Promise<string>;
 }
 
