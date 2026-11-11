@@ -262,6 +262,22 @@ function injectedDeadlockOnce(tx: PoolClient): Error | null {
   return error;
 }
 
+/**
+ * Test-only FIN-002 hook (P8.5): BV_TEST_FAULT_INJECT=abort_mid_transfer
+ * aborts a TRANSFER after the FIRST ledger entry is posted but BEFORE the
+ * second — the classic "crash between debit and credit" — so tests can prove
+ * the whole transaction rolls back (no partial journal, no balance change,
+ * key not consumed). Once per connection, so the row-9 retry executes the
+ * real command. Never set in production.
+ */
+function injectedMidTransferAbort(tx: PoolClient, operation: MoneyOperation): void {
+  if (operation !== "TRANSFER") return;
+  if (process.env.BV_TEST_FAULT_INJECT !== "abort_mid_transfer") return;
+  if (faultInjectedClients.has(tx)) return;
+  faultInjectedClients.add(tx);
+  throw new Error("injected mid-transfer abort (BV_TEST_FAULT_INJECT)");
+}
+
 export async function runMoneyCommand(
   tx: PoolClient,
   command: MoneyCommand,
@@ -710,6 +726,10 @@ async function executeMoneyTransaction(
         [journalTransactionId, entry.accountId, entry.direction, entry.amountMinor,
          entry.currencyCode, balanceAfter, eventSeq],
       );
+      // FIN-002 fault injection (P8.5): abort exactly between the first
+      // posting (debit) and the second (credit). Sanctioned test hook; the
+      // error propagates to the retry wrapper, which rolls everything back.
+      injectedMidTransferAbort(tx, command.operation);
     }
 
     await tx.query(

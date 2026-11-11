@@ -625,6 +625,283 @@ describe("ledger core invariants + races (real PostgreSQL; P6.8/CON-001/IDEM-003
       await closeIndependent(conn);
     }
   });
+
+  it("FIN-002: injected abort between debit and credit — whole transaction rolls back, key not consumed", async () => {
+    // P8.5: the classic crash mid-transfer. The sanctioned hook aborts after
+    // the FIRST posting; the retry wrapper must roll back EVERYTHING (journal,
+    // entries, balance bumps, seq allocation, idempotency claim) and surface
+    // the failure — with the key still usable for a legitimate retry.
+    const before = await independentConnection(appConnectionString());
+    let xBefore: string;
+    let yBefore: string;
+    try {
+      const { rows } = await before.query<{ x: string; y: string }>(
+        `SELECT
+           (SELECT balance_minor::text FROM accounts WHERE id = $1) AS x,
+           (SELECT balance_minor::text FROM accounts WHERE id = $2) AS y`,
+        [accountX, accountY],
+      );
+      xBefore = rows[0]!.x;
+      yBefore = rows[0]!.y;
+    } finally {
+      await closeIndependent(before);
+    }
+
+    const previousEnv = process.env.BV_TEST_FAULT_INJECT;
+    process.env.BV_TEST_FAULT_INJECT = "abort_mid_transfer";
+    const key = `fin2_${randomBytes(4).toString("hex")}`;
+    const command = () => ({
+      operation: "TRANSFER" as const,
+      idempotencyKey: key,
+      requestHash: canonicalHash({ op: "TRANSFER", key }),
+      actorId: holderId,
+      sessionId: holderSessionId,
+      sourceAccountId: accountX,
+      destinationAccountId: accountY,
+      amount: 777n,
+      currencyCode: "INR",
+    });
+    let failure: unknown = null;
+    const failedAt = new Date();
+    const conn = await independentConnection(appConnectionString());
+    try {
+      try {
+        await runMoneyCommand(conn, command());
+      } catch (error) {
+        failure = error;
+      }
+    } finally {
+      if (previousEnv === undefined) delete process.env.BV_TEST_FAULT_INJECT;
+      else process.env.BV_TEST_FAULT_INJECT = previousEnv;
+      await closeIndependent(conn);
+    }
+    expect(failure).not.toBeNull();
+
+    // Post-mortem: NOTHING durable happened, and the infrastructure failure
+    // left exactly one best-effort FAILED attempt row (D-9).
+    const check = await independentConnection(appConnectionString());
+    try {
+      const { rows } = await check.query<{
+        keys: string;
+        journals: string;
+        x: string;
+        y: string;
+        failed: string;
+      }>(
+        `SELECT
+           (SELECT COUNT(*)::text FROM idempotency_records WHERE idempotency_key = $1) AS keys,
+           (SELECT COUNT(*)::text FROM ledger_entries le
+             JOIN idempotency_records ir ON ir.journal_transaction_id = le.journal_transaction_id
+            WHERE ir.idempotency_key = $1) AS journals,
+           (SELECT balance_minor::text FROM accounts WHERE id = $2) AS x,
+           (SELECT balance_minor::text FROM accounts WHERE id = $3) AS y,
+           (SELECT COUNT(*)::text FROM transaction_attempts
+             WHERE actor_id = $4 AND status = 'FAILED' AND reason_code = 'INFRA_FAILURE'
+               AND created_at > $5) AS failed`,
+        [key, accountX, accountY, holderId, failedAt.toISOString()],
+      );
+      // Key NOT consumed, no partial journal, balances untouched, one D-9 row.
+      expect(rows[0]).toEqual({ keys: "0", journals: "0", x: xBefore, y: yBefore, failed: "1" });
+    } finally {
+      await closeIndependent(check);
+    }
+
+    // Correct idempotency behavior after an infrastructure failure: the SAME
+    // key performs the real work (row 8/9 — not consumed, retry-safe), and a
+    // third execution then replays the stored success (row 10).
+    const retryConn = await independentConnection(appConnectionString());
+    try {
+      const retry = await runMoneyCommand(retryConn, command());
+      expect(retry.replayed).toBe(false);
+      const replay = await runMoneyCommand(retryConn, command());
+      expect(replay.replayed).toBe(true);
+      expect(replay.journalTransactionId).toBe(retry.journalTransactionId);
+    } finally {
+      await closeIndependent(retryConn);
+    }
+    // Global invariants still hold after the aborted attempt.
+    const inv = await independentConnection(appConnectionString());
+    try {
+      expect((await assertGlobalInvariants(inv)).violations).toEqual([]);
+    } finally {
+      await closeIndependent(inv);
+    }
+  }, 40_000);
+
+  it("AUTH-008 (order 1): session revocation forced over an in-flight transfer — revocation WAITS for the commit", async () => {
+    // The transfer parks inside the sanctioned post-first-lock pause while
+    // holding the session row FOR SHARE (D-8 step 1). The revocation UPDATE
+    // launched mid-flight can only commit AFTER the transfer commits: had it
+    // landed first, the step-1 session read would have refused the transfer.
+    // A successful transfer + a successful revocation therefore PROVE the
+    // "operation that already authorised may finish" order (ADR-007).
+    const previousPause = process.env.BV_TEST_LOCK_PAUSE_MS;
+    process.env.BV_TEST_LOCK_PAUSE_MS = "800";
+    const key = `auth8a_${randomBytes(4).toString("hex")}`;
+    const transferPromise = (async () => {
+      const conn = await independentConnection(appConnectionString());
+      try {
+        return await runMoneyCommand(conn, {
+          operation: "TRANSFER",
+          idempotencyKey: key,
+          requestHash: canonicalHash({ op: "TRANSFER", key }),
+          actorId: holderId,
+          sessionId: holderSessionId,
+          sourceAccountId: accountX,
+          destinationAccountId: accountY,
+          amount: 55n,
+          currencyCode: "INR",
+        });
+      } finally {
+        await closeIndependent(conn);
+      }
+    })();
+    let revoked = false;
+    const revokePromise = (async () => {
+      // Park until the transfer is inside its pause window.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const conn = await independentConnection(appConnectionString());
+      try {
+        const { rowCount } = await conn.query(
+          "UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+          [holderSessionId],
+        );
+        revoked = rowCount === 1;
+      } finally {
+        await closeIndependent(conn);
+      }
+    })();
+    let transfer: { journalTransactionId: bigint; replayed: boolean } | null = null;
+    try {
+      [transfer] = await Promise.all([transferPromise, revokePromise]);
+    } finally {
+      if (previousPause === undefined) delete process.env.BV_TEST_LOCK_PAUSE_MS;
+      else process.env.BV_TEST_LOCK_PAUSE_MS = previousPause;
+    }
+    expect(transfer).not.toBeNull();
+    expect(transfer!.replayed).toBe(false);
+    expect(revoked).toBe(true);
+  }, 40_000);
+
+  it("AUTH-008 (order 2): a transfer started AFTER the session revocation committed is refused", async () => {
+    // holderSessionId was revoked by the order-1 test; D-8 step 1 (single
+    // active-session predicate under FOR SHARE) refuses with UNAUTHENTICATED
+    // and the replay gate never gets near the stored result.
+    const conn = await independentConnection(appConnectionString());
+    try {
+      await expect(
+        runMoneyCommand(conn, {
+          operation: "TRANSFER",
+          idempotencyKey: `auth8b_${randomBytes(4).toString("hex")}`,
+          requestHash: canonicalHash({ op: "TRANSFER", after: "revocation" }),
+          actorId: holderId,
+          sessionId: holderSessionId,
+          sourceAccountId: accountX,
+          destinationAccountId: accountY,
+          amount: 5n,
+          currencyCode: "INR",
+        }),
+      ).rejects.toThrow(/UNAUTHENTICATED/);
+    } finally {
+      await closeIndependent(conn);
+    }
+  });
+
+  it("AUTH-008 (grant): grant revocation forced over an in-flight transfer waits; a fresh transfer after revocation is refused with one D-9 row", async () => {
+    // Fresh session (the original was revoked above), then the same forced
+    // overlap against the GRANT row's FOR SHARE: the revocation UPDATE blocks
+    // until the already-authorised transfer commits (ADR-007).
+    const conn = await independentConnection(appConnectionString());
+    let holderSession2 = 0n;
+    try {
+      const { rows: sess } = await conn.query<{ id: string }>(
+        `INSERT INTO sessions (user_id, token_hash, expires_at)
+         VALUES ($1, $2, now() + interval '1 hour') RETURNING id::text AS id`,
+        [holderId, `race-token-${randomBytes(8).toString("hex")}`],
+      );
+      holderSession2 = BigInt(sess[0]!.id);
+    } finally {
+      await closeIndependent(conn);
+    }
+    const previousPause = process.env.BV_TEST_LOCK_PAUSE_MS;
+    process.env.BV_TEST_LOCK_PAUSE_MS = "800";
+    const key = `auth8c_${randomBytes(4).toString("hex")}`;
+    const transferPromise = (async () => {
+      const c = await independentConnection(appConnectionString());
+      try {
+        return await runMoneyCommand(c, {
+          operation: "TRANSFER",
+          idempotencyKey: key,
+          requestHash: canonicalHash({ op: "TRANSFER", key }),
+          actorId: holderId,
+          sessionId: holderSession2,
+          sourceAccountId: accountX,
+          destinationAccountId: accountY,
+          amount: 15n,
+          currencyCode: "INR",
+        });
+      } finally {
+        await closeIndependent(c);
+      }
+    })();
+    const revokePromise = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const c = await independentConnection(appConnectionString());
+      try {
+        await c.query(
+          `UPDATE account_permissions SET revoked_at = now()
+            WHERE user_id = $1 AND account_id = $2 AND permission = 'TRANSFER' AND revoked_at IS NULL`,
+          [holderId, accountX],
+        );
+      } finally {
+        await closeIndependent(c);
+      }
+    })();
+    let transfer: { journalTransactionId: bigint; replayed: boolean } | null = null;
+    try {
+      [transfer] = await Promise.all([transferPromise, revokePromise]);
+    } finally {
+      if (previousPause === undefined) delete process.env.BV_TEST_LOCK_PAUSE_MS;
+      else process.env.BV_TEST_LOCK_PAUSE_MS = previousPause;
+    }
+    expect(transfer).not.toBeNull();
+    expect(transfer!.replayed).toBe(false);
+
+    // A transfer started after the grant revocation committed is refused at
+    // the pre-claim site: uniform ACCOUNT_NOT_FOUND envelope plus exactly one
+    // D-9 authorisation-refusal attempt row (internal truth FORBIDDEN).
+    const refusedAt = new Date();
+    const fresh = await independentConnection(appConnectionString());
+    try {
+      await expect(
+        runMoneyCommand(fresh, {
+          operation: "TRANSFER",
+          idempotencyKey: `auth8d_${randomBytes(4).toString("hex")}`,
+          requestHash: canonicalHash({ op: "TRANSFER", after: "grant-revocation" }),
+          actorId: holderId,
+          sessionId: holderSession2,
+          sourceAccountId: accountX,
+          destinationAccountId: accountY,
+          amount: 5n,
+          currencyCode: "INR",
+        }),
+      ).rejects.toThrow(/ACCOUNT_NOT_FOUND/);
+    } finally {
+      await closeIndependent(fresh);
+    }
+    const check = await independentConnection(appConnectionString());
+    try {
+      const { rows } = await check.query<{ d9: string }>(
+        `SELECT COUNT(*)::text AS d9 FROM transaction_attempts
+          WHERE actor_id = $1 AND status = 'REFUSED'
+            AND created_at > $2 AND account_event_seq IS NULL`,
+        [holderId, refusedAt.toISOString()],
+      );
+      expect(rows[0]!.d9).toBe("1");
+    } finally {
+      await closeIndependent(check);
+    }
+  }, 40_000);
 });
 
 /** Extract the refusal code from a rejected runner promise (DomainError). */

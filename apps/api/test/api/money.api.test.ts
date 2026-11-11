@@ -707,6 +707,152 @@ describe("money endpoints (real services; PHASE-06 P6.9)", () => {
       else process.env.T042_ATTEMPT_WRITE_CAP = previousCap;
     }
   });
+
+  it("IDEM-006 (session): replay after session revocation is 401 UNAUTHENTICATED — never the stored success", async () => {
+    // Row 7 gate, stage (a): before ANY stored outcome is returned the session
+    // is re-read under FOR SHARE; a revoked session never receives the stored
+    // 200 — and never a 404 for the revocation. The stored outcome itself
+    // stays untouched, and the gate pass is evaluation-only (no attempt rows).
+    const admin = await adminCookie();
+    const key = `idem6sess_${randomBytes(4).toString("hex")}`;
+    const deposit = () =>
+      app.inject({
+        method: "POST",
+        url: `/accounts/${accountA}/deposits`,
+        cookies: { bv_session: cookieValue(admin) },
+        headers: { "idempotency-key": key },
+        payload: { amountMinor: "610", currencyCode: "INR" },
+      });
+    const first = await deposit();
+    expect(first.statusCode).toBe(200);
+    expect(first.json().replayed).toBe(false);
+
+    // Revoke ALL of the admin's sessions directly (the login lifecycle's
+    // revocation primitive; ADR-007).
+    const adminId = await currentActorId("admin");
+    const revokedAt = new Date();
+    const conn = await independentConnection(appConnectionString());
+    try {
+      await conn.query(
+        "UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
+        [BigInt(adminId)],
+      );
+    } finally {
+      await closeIndependent(conn);
+    }
+
+    const replay = await deposit();
+    expect(replay.statusCode).toBe(401);
+    expect(replay.json().error.code).toBe("UNAUTHENTICATED");
+
+    // Stored truth intact: one idempotency row, one journal; and the revoked
+    // replay left NO new attempt rows (gate refusals are evaluation-only).
+    const check = await independentConnection(appConnectionString());
+    try {
+      const { rows } = await check.query<{ keys: string; journals: string; attempts: string }>(
+        `SELECT
+           (SELECT COUNT(*)::text FROM idempotency_records WHERE idempotency_key = $1) AS keys,
+           (SELECT COUNT(DISTINCT journal_transaction_id)::text FROM idempotency_records
+             WHERE idempotency_key = $1 AND journal_transaction_id IS NOT NULL) AS journals,
+           (SELECT COUNT(*)::text FROM transaction_attempts
+             WHERE actor_id = $2 AND created_at > $3) AS attempts`,
+        [key, BigInt(adminId), revokedAt.toISOString()],
+      );
+      expect(rows[0]).toEqual({ keys: "1", journals: "1", attempts: "0" });
+    } finally {
+      await closeIndependent(check);
+    }
+  });
+
+  it("IDEM-006 (grant): replay after grant revocation is the uniform 404 + one D-9 row; re-grant replays the stored success", async () => {
+    // Row 7 gate, stage (b): a replay whose grant was revoked is refused at
+    // D-8 step 1b BEFORE the key row is read — the uniform 404 envelope, one
+    // D-9 authorisation-refusal row per refused call (REPLAY-AUTHZ-001), key
+    // still NOT consumed. Once the grant is restored, the same key replays
+    // the original stored success.
+    const admin = await adminCookie();
+    const holder = await holderCookie();
+    const created = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      cookies: { bv_session: cookieValue(admin) },
+      payload: {
+        accountNumber: uniqueAccountNumber(),
+        label: "IDEM-006 grant-replay",
+        currencyCode: "INR",
+        kind: "CUSTOMER",
+        status: "ACTIVE",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const accountId = created.json().account.id;
+    await grant("WITHDRAW", accountId, fixture.holderEmail);
+    await grant("VIEW", accountId, fixture.holderEmail);
+    const seeded = await app.inject({
+      method: "POST",
+      url: `/accounts/${accountId}/deposits`,
+      cookies: { bv_session: cookieValue(admin) },
+      headers: { "idempotency-key": `idem6fund_${randomBytes(4).toString("hex")}` },
+      payload: { amountMinor: "5000", currencyCode: "INR" },
+    });
+    expect(seeded.statusCode).toBe(200);
+
+    const key = `idem6grant_${randomBytes(4).toString("hex")}`;
+    const withdraw = () =>
+      app.inject({
+        method: "POST",
+        url: `/accounts/${accountId}/withdrawals`,
+        cookies: { bv_session: cookieValue(holder) },
+        headers: { "idempotency-key": key },
+        payload: { amountMinor: "300", currencyCode: "INR" },
+      });
+    const first = await withdraw();
+    expect(first.statusCode).toBe(200);
+    expect(first.json().replayed).toBe(false);
+
+    const holderId = await currentActorId("holder");
+    const conn = await independentConnection(appConnectionString());
+    try {
+      const { rowCount } = await conn.query(
+        `UPDATE account_permissions SET revoked_at = now()
+          WHERE user_id = $1 AND account_id = $2 AND permission = 'WITHDRAW' AND revoked_at IS NULL`,
+        [BigInt(holderId), BigInt(accountId)],
+      );
+      expect(rowCount).toBe(1);
+    } finally {
+      await closeIndependent(conn);
+    }
+
+    const refusedAt = new Date();
+    const replay = await withdraw();
+    expect(replay.statusCode).toBe(404);
+    expect(replay.json().error.code).toBe("ACCOUNT_NOT_FOUND");
+
+    // Exactly one D-9 authorisation-refusal row for the refused replay
+    // (unsequenced, no fabricated balance), and the key was NOT consumed:
+    // still exactly one idempotency row for the key.
+    const check = await independentConnection(appConnectionString());
+    try {
+      const { rows } = await check.query<{ d9: string; keys: string }>(
+        `SELECT
+           (SELECT COUNT(*)::text FROM transaction_attempts
+             WHERE actor_id = $1 AND status = 'REFUSED'
+               AND account_event_seq IS NULL AND created_at > $3) AS d9,
+           (SELECT COUNT(*)::text FROM idempotency_records WHERE idempotency_key = $2) AS keys`,
+        [BigInt(holderId), key, refusedAt.toISOString()],
+      );
+      expect(rows[0]).toEqual({ d9: "1", keys: "1" });
+    } finally {
+      await closeIndependent(check);
+    }
+
+    // Re-grant: the gate now passes and the ORIGINAL stored success replays.
+    await grant("WITHDRAW", accountId, fixture.holderEmail);
+    const restored = await withdraw();
+    expect(restored.statusCode).toBe(200);
+    expect(restored.json().replayed).toBe(true);
+    expect(restored.json().journalTransactionId).toBe(first.json().journalTransactionId);
+  });
 });
 
 /** Cookie header value from a Set-Cookie string. */
