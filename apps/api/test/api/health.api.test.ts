@@ -5,6 +5,7 @@ import { buildApp } from "../../src/http/app.js";
 import { loadConfig } from "../../src/config.js";
 import { createPgPool } from "../../src/infrastructure/pg.js";
 import { createRedisClient } from "../../src/infrastructure/redis.js";
+import { prismaClient } from "../../src/infrastructure/prisma.js";
 import { appConnectionString, envOrThrow } from "../harness.js";
 
 /**
@@ -26,12 +27,13 @@ describe("health & readiness endpoints (real services)", () => {
       config: cfg,
       pgPool,
       redis,
-      prisma: null, // routine-path smoke is asserted in prismaBoundary.test.ts
+      prisma: prismaClient(), // routine path (ADR-005); financial smoke lives in prismaBoundary.test.ts
     });
   });
 
   afterAll(async () => {
     await app?.close();
+    await prismaClient().$disconnect().catch(() => undefined);
     await redis.quit?.().catch(() => undefined);
     await pgPool?.end();
   });
@@ -54,7 +56,7 @@ describe("health & readiness endpoints (real services)", () => {
     // Independent app where Redis pings fail (dead address) — fail-soft infra.
     const deadRedis = createRedisClient({ url: "redis://127.0.0.1:9", lazyConnect: true });
     const cfg = loadConfig(process.env);
-    const app2 = buildApp({ config: cfg, pgPool, redis: deadRedis, prisma: null });
+    const app2 = buildApp({ config: cfg, pgPool, redis: deadRedis, prisma: prismaClient() });
     try {
       const res = await app2.inject({ method: "GET", url: "/ready" });
       expect(res.statusCode).toBe(503);
