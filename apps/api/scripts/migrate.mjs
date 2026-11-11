@@ -32,8 +32,32 @@ if (!url || url.length === 0) {
 
 // node-pg-migrate is ESM-only in v8 — dynamic import keeps this runner dual-safe.
 const { runner } = await import("node-pg-migrate");
+const { Client } = await import("pg");
+
+/**
+ * `--bootstrap` is ONLY for role creation (migration 0001). Applying the whole
+ * set as the bootstrap superuser would leave the financial tables owned by
+ * bootstrap instead of ledgerline_owner (the CI failure this guard fixes), and
+ * ADR-005 makes ledgerline_owner the DDL owner from 0002 onwards.
+ */
+async function bootstrapAlreadyApplied() {
+  const client = new Client({ connectionString: url });
+  try {
+    await client.connect();
+    const { rows } = await client.query(
+      `SELECT 1 FROM pgmigrations WHERE name LIKE '0001%' LIMIT 1`,
+    );
+    return rows.length > 0;
+  } finally {
+    await client.end();
+  }
+}
 
 try {
+  if (bootstrap && (await bootstrapAlreadyApplied())) {
+    console.log("[bootstrap] migration 0001 already applied — nothing to do.");
+    process.exit(0);
+  }
   await runner({
     databaseUrl: url,
     // node-pg-migrate v8 API: `dir` (path resolved from cwd), default table pgmigrations.
@@ -42,7 +66,9 @@ try {
     migrationsSchema: "public",
     schema: "public",
     direction: down ? "down" : "up",
-    count: Infinity,
+    // Bootstrap mode applies ONLY 0001 (role creation); every later migration
+    // must be applied by ledgerline_owner so it owns the tables it creates.
+    count: bootstrap ? 1 : Infinity,
     verbose: process.env.LOG_LEVEL === "debug",
   });
   console.log(`[${bootstrap ? "bootstrap" : "owner"}] migration run finished.`);
