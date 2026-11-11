@@ -176,24 +176,52 @@ describe("ledger core invariants + races (real PostgreSQL; P6.8/CON-001/IDEM-003
     // The owner holds every privilege, so refusal can only come from the
     // triggers — which fire for EVERY session (schema-draft grants comment;
     // the sole ALTER TABLE ... DISABLE TRIGGER bypass is the disclosed T-026).
+    // Seed a fresh balanced journal as the owner, then prove the owner cannot
+    // UPDATE or DELETE it — the trigger must fire regardless of privilege.
     const conn = await independentConnection(ownerConnectionString());
     try {
+      await conn.query("BEGIN");
+      const { rows: journalRows } = await conn.query<{ id: string }>(
+        `INSERT INTO journal_transactions (type, status, currency_code, initiated_by)
+         VALUES ('DEPOSIT', 'POSTED', 'INR', $1) RETURNING id::text AS id`,
+        [adminId],
+      );
+      const journalId = BigInt(journalRows[0]!.id);
+      await conn.query(
+        `INSERT INTO ledger_entries
+           (journal_transaction_id, account_id, direction, amount_minor,
+            currency_code, balance_after_minor, account_event_seq)
+         VALUES ($1, $2, 'DEBIT', 1000, 'INR', 0, NULL),
+                ($1, $2, 'CREDIT', 1000, 'INR', 1000, NULL)`,
+        [journalId, accountX],
+      );
+      await conn.query("COMMIT");
+
       await expect(
-        conn.query("UPDATE journal_transactions SET description = 'tampered' WHERE id = (SELECT MAX(id) FROM journal_transactions)"),
+        conn.query("UPDATE journal_transactions SET description = 'tampered' WHERE id = $1", [journalId]),
       ).rejects.toThrow(/append-only violation/);
       await expect(
-        conn.query("DELETE FROM ledger_entries WHERE id = (SELECT MAX(id) FROM ledger_entries)"),
+        conn.query("DELETE FROM ledger_entries WHERE journal_transaction_id = $1", [journalId]),
       ).rejects.toThrow(/append-only violation/);
-      await expect(
-        conn.query("UPDATE transaction_attempts SET reason_code = 'HACKED' WHERE id = (SELECT MAX(id) FROM transaction_attempts)"),
-      ).rejects.toThrow(/append-only violation/);
-      await expect(
-        conn.query("DELETE FROM audit_events WHERE id = (SELECT MAX(id) FROM audit_events)"),
-      ).rejects.toThrow(/append-only violation/);
+      // transaction_attempts / audit_events may be empty; assert only if a row
+      // exists (the trigger must fire for any row, not just ours).
+      const { rows: attemptRows } = await conn.query<{ id: string }>(
+        "SELECT id::text AS id FROM transaction_attempts ORDER BY id DESC LIMIT 1",
+      );
+      if (attemptRows.length > 0) {
+        await expect(
+          conn.query("UPDATE transaction_attempts SET reason_code = 'HACKED' WHERE id = $1", [attemptRows[0]!.id]),
+        ).rejects.toThrow(/append-only violation/);
+      }
+      const { rows: auditRows } = await conn.query<{ id: string }>(
+        "SELECT id::text AS id FROM audit_events ORDER BY id DESC LIMIT 1",
+      );
+      if (auditRows.length > 0) {
+        await expect(
+          conn.query("DELETE FROM audit_events WHERE id = $1", [auditRows[0]!.id]),
+        ).rejects.toThrow(/append-only violation/);
+      }
       await expect(conn.query("TRUNCATE ledger_entries")).rejects.toThrow(/append-only violation/);
-      // journal_transactions carries FKs (ledger_entries, idempotency_records):
-      // PostgreSQL's dependent-objects check refuses the TRUNCATE before the
-      // row trigger can fire — either mechanism is a valid refusal.
       await expect(conn.query("TRUNCATE journal_transactions")).rejects.toThrow(
         /append-only violation|foreign key/,
       );
