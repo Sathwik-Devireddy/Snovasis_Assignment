@@ -44,11 +44,14 @@ async function bootstrapAlreadyApplied() {
   const client = new Client({ connectionString: url });
   try {
     await client.connect();
-    // to_regclass is NULL before the first run ever created the table.
+    // Two separate statements: a same-statement EXISTS on a not-yet-existing
+    // table can still be planned/executed before the to_regclass check.
+    const { rows: tableRows } = await client.query(
+      `SELECT to_regclass('public.pgmigrations') AS t`,
+    );
+    if (tableRows[0]?.t === null) return false;
     const { rows } = await client.query(
-      `SELECT 1
-         WHERE to_regclass('public.pgmigrations') IS NOT NULL
-           AND EXISTS (SELECT 1 FROM pgmigrations WHERE name LIKE '0001%' LIMIT 1)`,
+      `SELECT 1 FROM pgmigrations WHERE name LIKE '0001%' LIMIT 1`,
     );
     return rows.length > 0;
   } finally {
