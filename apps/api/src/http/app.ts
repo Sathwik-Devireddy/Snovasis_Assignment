@@ -10,6 +10,7 @@ import { registerRegisterRoute } from "./routes/register.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerMoneyRoutes } from "./routes/money.js";
 import { registerAccountRoutes } from "./routes/accounts.js";
+import { registerStatementRoutes } from "./routes/statements.js";
 import { mapToErrorResponse } from "./errorMapper.js";
 import type { RedisLike } from "../infrastructure/redis.js";
 import type { PrismaClient } from "../infrastructure/prisma.js";
@@ -92,6 +93,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     rateLimits,
   });
   registerAccountRoutes(app, { pgPool: deps.pgPool, prisma: deps.prisma, config: deps.config });
+  registerStatementRoutes(app, { pgPool: deps.pgPool, sessions });
 
   return app;
 }
