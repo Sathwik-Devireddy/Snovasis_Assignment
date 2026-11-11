@@ -57,11 +57,13 @@ model Session {
 model AccountPermission {
   id         BigInt    @id @default(autoincrement())
   userId     BigInt    @map("user_id")
-  accountId  BigInt    @map("account_id") // FK → accounts added with the accounts table (Phase 6, P5.1 stub)
+  accountId  BigInt    @map("account_id") // FK → accounts (real since Phase 6 migration 0003)
   permission String // VIEW | DEPOSIT | WITHDRAW | TRANSFER | ADJUST
   grantedBy  BigInt?   @map("granted_by")
   grantedAt  DateTime  @default(now()) @map("granted_at")
   revokedAt  DateTime? @map("revoked_at") // revocation keeps the row; a new grant is a new row
+
+  account    Account   @relation(fields: [accountId], references: [id])
 
   @@index([userId, accountId, permission])
   @@map("account_permissions")
@@ -93,4 +95,100 @@ model AdminControl {
 
   @@map("admin_control")
 }
+
+// Phase 6 (P6.1): migration 0003_ledger created accounts / journal_transactions /
+// ledger_entries / transaction_attempts / idempotency_records via
+// node-pg-migrate; the models below mirror that migrated schema (PRISMA-001).
+//
+// AccountPermission.accountId FK → accounts is now real (was stubbed in P5.1).
+
+model Account {
+  id               BigInt   @id @default(autoincrement()) // BIGINT GENERATED ALWAYS AS IDENTITY
+  accountNumber    String   @map("account_number") // opaque public identifier; UNIQUE
+  label            String
+  currencyCode     String   @map("currency_code")
+  kind             String // CUSTOMER | SYSTEM (CHECK accounts_kind_enum)
+  balanceMinor     BigInt?  @map("balance_minor") // CUSTOMER only; NULL for SYSTEM
+  eventLastSeq     BigInt?  @map("event_last_seq") // CUSTOMER only; NULL for SYSTEM
+  status           String // ACTIVE | SUSPENDED | CLOSED (CHECK accounts_status_enum)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  ledgerEntries    LedgerEntry[]
+  transactionAttempts TransactionAttempt[] // as source account
+  accountPermissions AccountPermission[]
+
+  @@map("accounts")
+}
+
+model JournalTransaction {
+  id                     BigInt   @id @default(autoincrement())
+  type                   String // DEPOSIT | WITHDRAWAL | TRANSFER | ADJUSTMENT | REVERSAL (CHECK)
+  status                 String // POSTED (CHECK journal_status_enum)
+  currencyCode           String   @map("currency_code")
+  initiatedBy            BigInt?  @map("initiated_by")
+  idempotencyRecordId    BigInt?  @map("idempotency_record_id") // NULL for refused outcomes
+  description            String?
+  createdAt              DateTime @default(now()) @map("created_at")
+  ledgerEntries          LedgerEntry[]
+
+  @@map("journal_transactions")
+}
+
+model LedgerEntry {
+  id                      BigInt   @id @default(autoincrement())
+  journalTransactionId    BigInt   @map("journal_transaction_id")
+  accountId               BigInt   @map("account_id")
+  direction               String // DEBIT | CREDIT (CHECK ledger_direction_enum)
+  amountMinor             BigInt   @map("amount_minor") // > 0
+  currencyCode            String   @map("currency_code")
+  balanceAfterMinor       BigInt?  @map("balance_after_minor") // NULL for SYSTEM
+  accountEventSeq         BigInt?  @map("account_event_seq") // NULL for SYSTEM
+  createdAt               DateTime @default(now()) @map("created_at")
+
+  journalTransaction      JournalTransaction @relation(fields: [journalTransactionId], references: [id])
+  account                 Account @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, createdAt, id])
+  @@index([journalTransactionId])
+  @@map("ledger_entries")
+}
+
+model TransactionAttempt {
+  id                       BigInt   @id @default(autoincrement())
+  globalSeq                BigInt   @default(autoincrement()) @map("global_seq") // nextval('attempt_global_seq')
+  actorId                  BigInt?  @map("actor_id") // NULL where protocol allows
+  operation                String
+  status                   String // SUCCEEDED | REFUSED | FAILED (CHECK attempts_status_enum)
+  reasonCode               String   @map("reason_code") // closed external code list
+  suppliedAccountRef       String?  @map("supplied_account_ref")
+  accountId                BigInt?  @map("account_id") // absent for nonexistent targets
+  balanceAtAttemptMinor    BigInt?  @map("balance_at_attempt_minor") // only under lock
+  accountEventSeq          BigInt?  @map("account_event_seq") // only under lock
+  accountStatusDetail      String?  @map("account_status_detail") // ADMIN/AUDITOR only
+  createdAt                DateTime @default(now()) @map("created_at")
+
+  account                  Account? @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, createdAt, id])
+  @@index([actorId, createdAt, id])
+  @@map("transaction_attempts")
+}
+
+model IdempotencyRecord {
+  id                     BigInt   @id @default(autoincrement())
+  actorId                BigInt   @map("actor_id")
+  operation              String
+  idempotencyKey         String   @map("idempotency_key") // <= 64 chars, opaque
+  requestHash            String   @map("request_hash") // canonical payload hash
+  responseStatus         Int?     @map("response_status")
+  responseBody           Json?    @map("response_body") // semantic-replay artifact
+  journalTransactionId   BigInt?  @map("journal_transaction_id") // NULL for refused
+  createdAt              DateTime @default(now()) @map("created_at")
+  completedAt            DateTime? @map("completed_at")
+  expiresAt              DateTime? @map("expires_at") // always NULL in v1
+
+  @@unique([actorId, operation, idempotencyKey]) // idempotency_scope_unique
+  @@map("idempotency_records")
+}
+
 

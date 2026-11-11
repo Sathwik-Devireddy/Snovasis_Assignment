@@ -15,6 +15,6 @@ export default defineConfig({
     include: ["test/**/*.test.ts"],
     testTimeout: 30_000,
     hookTimeout: 30_000,
-    filesParallel: false, // concurrency tests need deterministic DB ordering
+    fileParallelism: false, // sequential files: every suite shares the one dev DB
   },
 });

@@ -18,10 +18,10 @@ const systemAccount = (): AccountRef => ({ id: "2001", kind: "SYSTEM", status: "
 const grant = (permission: string) => ({ permission: permission as "VIEW" | "DEPOSIT" | "WITHDRAW" | "TRANSFER" });
 const grantOrNull = (p: string | null) => (p === null ? null : grant(p));
 
-const admin = (): Actor => ({ role: "ADMIN", status: "ACTIVE" });
-const holder = (): Actor => ({ role: "ACCOUNT_HOLDER", status: "ACTIVE" });
-const auditor = (): Actor => ({ role: "AUDITOR", status: "ACTIVE" });
-const disabled = (role: Actor["role"]): Actor => ({ role, status: "DISABLED" });
+const admin = (): Actor => ({ id: "1", role: "ADMIN", status: "ACTIVE" });
+const holder = (): Actor => ({ id: "2", role: "ACCOUNT_HOLDER", status: "ACTIVE" });
+const auditor = (): Actor => ({ id: "3", role: "AUDITOR", status: "ACTIVE" });
+const disabled = (role: Actor["role"]): Actor => ({ id: "4", role, status: "DISABLED" });
 
 describe("VIEW_ACCOUNT / VIEW_STATEMENT (AUTHZ_MATRIX §A rows 1–2)", () => {
   it("ADMIN: any account without a grant (role-level)", () => {

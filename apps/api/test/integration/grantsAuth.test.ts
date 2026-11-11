@@ -44,7 +44,7 @@ describe("authorizeInTransaction (real PostgreSQL; P5.7b)", () => {
     await closeIndependent(conn);
   });
 
-  const actor = () => ({ role: "ACCOUNT_HOLDER" as const, status: "ACTIVE" as const });
+  const actor = () => ({ id: "1", role: "ACCOUNT_HOLDER" as const, status: "ACTIVE" as const });
 
   it("an allowed action reads the grant FOR SHARE in-transaction and passes (deny-by-default holds elsewhere)", async () => {
     await conn.query(
@@ -130,7 +130,7 @@ describe("authorizeInTransaction (real PostgreSQL; P5.7b)", () => {
     try {
       const decision = await authorizeInTransaction(conn, {
         actorId: holderId,
-        actor: { role: "ACCOUNT_HOLDER", status: "DISABLED" },
+        actor: { id: "2", role: "ACCOUNT_HOLDER", status: "DISABLED" },
         action: "TRANSFER",
         accounts: [{ id: accountA, kind: "CUSTOMER", status: "ACTIVE" }],
       });

@@ -43,13 +43,9 @@ function runRotation(env: Record<string, string | undefined>, args: string[] = [
 async function purgeMarkerFamily(): Promise<void> {
   const superuser = await independentConnection(bootstrapConnectionString());
   try {
-    // Cascade-safe order: audit rows → sessions → users (same marker family ONLY).
-    await superuser.query(
-      `DELETE FROM audit_events
-        WHERE (subject_type = 'user' AND subject_id IN (SELECT id::text FROM users WHERE email LIKE $1 || '%'))
-           OR (event_type IN ('bootstrap_created','admin_credential_rotation') AND metadata::text LIKE $1)`,
-      [markerPrefix],
-    );
+    // Clean up sessions and users (marker family only). audit_events is
+    // append-only (trigger-guarded) so we do not delete from it — marker
+    // family audit rows simply accumulate, which is harmless for tests.
     await superuser.query(`DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1 || '%')`, [markerPrefix]);
     await superuser.query(`DELETE FROM users WHERE email LIKE $1 || '%'`, [markerPrefix]);
   } finally {

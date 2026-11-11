@@ -8,6 +8,8 @@ import { registerReadyRoutes } from "./routes/ready.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerRegisterRoute } from "./routes/register.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { registerMoneyRoutes } from "./routes/money.js";
+import { registerAccountRoutes } from "./routes/accounts.js";
 import { mapToErrorResponse } from "./errorMapper.js";
 import type { RedisLike } from "../infrastructure/redis.js";
 import type { PrismaClient } from "../infrastructure/prisma.js";
@@ -83,6 +85,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerRegisterRoute(app, { prisma: deps.prisma, rateLimits });
   registerAuthRoutes(app, { prisma: deps.prisma, sessions, rateLimits });
   registerAdminRoutes(app, { pgPool: deps.pgPool, prisma: deps.prisma, config: deps.config });
+  registerMoneyRoutes(app, {
+    pgPool: deps.pgPool,
+    prisma: deps.prisma,
+    config: deps.config,
+    rateLimits,
+  });
+  registerAccountRoutes(app, { pgPool: deps.pgPool, prisma: deps.prisma, config: deps.config });
 
   return app;
 }

@@ -23,6 +23,7 @@ export type AccountRef = {
 };
 
 export type Actor = {
+  id: string;
   role: Role;
   status: "ACTIVE" | "DISABLED";
 };
