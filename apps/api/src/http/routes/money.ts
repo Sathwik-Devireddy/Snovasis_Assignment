@@ -31,6 +31,7 @@ import { assertMutationHeaders } from "../guards.js";
 import { DomainError } from "../errors.js";
 import { rateLimiter, type RateLimitDeps } from "../../infrastructure/rateLimiter.js";
 import { runMoneyCommand, type MoneyCommand } from "../../domain/transactionRunner.js";
+import { initiatorDisplayName } from "../../domain/statement.js";
 import { canonicalHash, parseMinor } from "../../domain/money.js";
 
 const IdempotencyKeyHeader = z
@@ -229,6 +230,106 @@ export function registerMoneyRoutes(
       };
       const out = await runCommand(request, command);
       return await reply.code(out.statusCode).send(out.body);
+    },
+  );
+
+  // GET /transactions/:transactionId — inspect a single money-movement
+  // transaction (PHASE-10 P10.2 actor-scoped transaction history; API_CONTRACT).
+  // Actor-scoped visibility: ADMIN/AUDITOR see any transaction; a holder sees
+  // it only if they hold an active VIEW grant on at least one involved
+  // account; otherwise the uniform 404 ACCOUNT_NOT_FOUND envelope (two-sided
+  // truth). Money/sequence fields serialised as strings (T-049).
+  app.get(
+    "/transactions/:transactionId",
+    { preHandler: [authenticate] },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) throw new DomainError("UNAUTHENTICATED", "UNAUTHENTICATED");
+      const rawId = (request.params as { transactionId: string }).transactionId;
+      if (!/^\d{1,19}$/.test(rawId)) {
+        throw new DomainError("ACCOUNT_NOT_FOUND", "ACCOUNT_NOT_FOUND");
+      }
+      const transactionId = BigInt(rawId);
+
+      const client = await pgPool.connect();
+      try {
+        const { rows: txRows } = await client.query<{
+          id: string;
+          type: string;
+          status: string;
+          currency_code: string;
+          initiated_by: string | null;
+          created_at: Date;
+          description: string | null;
+        }>(
+          `SELECT jt.id::text AS id, jt.type, jt.status, jt.currency_code,
+                  jt.initiated_by::text AS initiated_by, jt.created_at, jt.description
+             FROM journal_transactions jt
+            WHERE jt.id = $1
+              AND ($2 = 'ADMIN' OR $2 = 'AUDITOR' OR EXISTS (
+                SELECT 1 FROM ledger_entries le
+                 JOIN account_permissions p ON p.account_id = le.account_id
+                  WHERE p.user_id = $3 AND p.revoked_at IS NULL
+                    AND p.permission = 'VIEW'
+                    AND le.journal_transaction_id = jt.id))`,
+          [transactionId, actor.role, BigInt(actor.id)],
+        );
+        if (txRows.length === 0) {
+          throw new DomainError("ACCOUNT_NOT_FOUND", "ACCOUNT_NOT_FOUND");
+        }
+        const tx = txRows[0]!;
+
+        const { rows: entryRows } = await client.query<{
+          account_id: string;
+          direction: string;
+          amount_minor: string;
+          balance_after_minor: string | null;
+          account_event_seq: string | null;
+        }>(
+          `SELECT le.account_id::text AS account_id, le.direction,
+                  le.amount_minor::text AS amount_minor,
+                  le.balance_after_minor::text AS balance_after_minor,
+                  le.account_event_seq::text AS account_event_seq
+             FROM ledger_entries le
+            WHERE le.journal_transaction_id = $1
+            ORDER BY le.id ASC`,
+          [transactionId],
+        );
+
+        const initiatorEmail = await (
+          await client.query<{ email: string }>(
+            "SELECT u.email AS email FROM users u WHERE u.id = $1",
+            [tx.initiated_by ?? "0"],
+          )
+        ).rows[0]?.email ?? null;
+
+        return await reply.code(200).send({
+          transaction: {
+            id: tx.id,
+            type: tx.type,
+            status: tx.status,
+            currencyCode: tx.currency_code,
+            initiatedBy:
+              tx.initiated_by === null
+                ? null
+                : {
+                    userId: tx.initiated_by,
+                    displayName: initiatorDisplayName(initiatorEmail),
+                  },
+            createdAt: tx.created_at.toISOString(),
+            description: tx.description,
+          },
+          postings: entryRows.map((e) => ({
+            accountId: e.account_id,
+            direction: e.direction,
+            amountMinor: e.amount_minor,
+            balanceAfterMinor: e.balance_after_minor,
+            accountEventSeq: e.account_event_seq,
+          })),
+        });
+      } finally {
+        client.release();
+      }
     },
   );
 }

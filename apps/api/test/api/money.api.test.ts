@@ -35,7 +35,10 @@ type Fixture = {
   adminPassword: string;
   holderEmail: string;
   holderPassword: string;
+  auditorEmail: string;
+  auditorPassword: string;
   strangerEmail: string;
+  strangerPassword: string;
 };
 
 let fixture!: Fixture;
@@ -47,6 +50,7 @@ describe("money endpoints (real services; PHASE-06 P6.9)", () => {
   let redis: ReturnType<typeof createRedisClient>;
   const adminPassword = `admin-pw-${randomBytes(8).toString("hex")}-0123456789`;
   const holderPassword = `holder-pw-${randomBytes(8).toString("hex")}-0123456789`;
+  const auditorPassword = `auditor-pw-${randomBytes(8).toString("hex")}-0123456789`;
   const strangerPassword = `stranger-pw-${randomBytes(8).toString("hex")}-0123456789`;
   let accountA = ""; // holder-operated CUSTOMER account
   let accountB = ""; // transfer destination
@@ -71,6 +75,7 @@ describe("money endpoints (real services; PHASE-06 P6.9)", () => {
       };
       const adminId = await insert(`admin_${suffix}@test.local`, await hashPassword(adminPassword), "ADMIN");
       await insert(`holder_${suffix}@test.local`, await hashPassword(holderPassword), "ACCOUNT_HOLDER");
+      await insert(`auditor_${suffix}@test.local`, await hashPassword(auditorPassword), "AUDITOR");
       await insert(`stranger_${suffix}@test.local`, await hashPassword(strangerPassword), "ACCOUNT_HOLDER");
       fixture = {
         suffix,
@@ -78,7 +83,10 @@ describe("money endpoints (real services; PHASE-06 P6.9)", () => {
         adminPassword,
         holderEmail: `holder_${suffix}@test.local`,
         holderPassword,
+        auditorEmail: `auditor_${suffix}@test.local`,
+        auditorPassword,
         strangerEmail: `stranger_${suffix}@test.local`,
+        strangerPassword,
       };
       void adminId;
     } finally {
@@ -151,6 +159,7 @@ describe("money endpoints (real services; PHASE-06 P6.9)", () => {
 
   const adminCookie = () => login(fixture.adminEmail, adminPassword);
   const holderCookie = () => login(fixture.holderEmail, holderPassword);
+  const auditorCookie = () => login(fixture.auditorEmail, auditorPassword);
   const strangerCookie = () => login(fixture.strangerEmail, strangerPassword);
 
   const uniqueAccountNumber = () => `acc_${randomBytes(6).toString("hex")}`;
@@ -852,6 +861,120 @@ describe("money endpoints (real services; PHASE-06 P6.9)", () => {
     expect(restored.statusCode).toBe(200);
     expect(restored.json().replayed).toBe(true);
     expect(restored.json().journalTransactionId).toBe(first.json().journalTransactionId);
+  });
+
+  it("P10.2: GET /transactions/:id — actor-scoped transaction inspection, BigInt-safe strings", async () => {
+    const holder = await holderCookie();
+    const stranger = await strangerCookie();
+    const auditor = await auditorCookie();
+    const admin = await adminCookie();
+
+    // A fresh account C where ONLY the holder has a VIEW grant — the stranger
+    // has no grant on C, so a transaction touching C must be 404 for them.
+    const cRes = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      cookies: { bv_session: cookieValue(admin) },
+      payload: {
+        accountNumber: uniqueAccountNumber(),
+        label: "P10.2 account C",
+        currencyCode: "INR",
+        kind: "CUSTOMER",
+        status: "ACTIVE",
+      },
+    });
+    expect(cRes.statusCode).toBe(201);
+    const accountC = cRes.json().account.id;
+    await grant("VIEW", accountC, fixture.holderEmail);
+    await grant("WITHDRAW", accountC, fixture.holderEmail);
+    await grant("TRANSFER", accountC, fixture.holderEmail);
+
+    // Fund C, then transfer C→B and capture the journal id.
+    await app.inject({
+      method: "POST",
+      url: `/accounts/${accountC}/deposits`,
+      cookies: { bv_session: cookieValue(admin) },
+      headers: { "idempotency-key": `p102_fund_${randomBytes(4).toString("hex")}` },
+      payload: { amountMinor: "10000", currencyCode: "INR" },
+    });
+    const ok = await app.inject({
+      method: "POST",
+      url: "/transfers",
+      cookies: { bv_session: cookieValue(holder) },
+      headers: { "idempotency-key": `p102_tr_${randomBytes(4).toString("hex")}` },
+      payload: {
+        sourceAccountId: accountC,
+        destinationAccountId: accountB,
+        amountMinor: "7777",
+        currencyCode: "INR",
+      },
+    });
+    expect(ok.statusCode).toBe(200);
+    const journalId = ok.json().journalTransactionId;
+    expect(typeof journalId).toBe("string"); // BigInt-safe string serialisation
+
+    const tx = (id: string, cookie: string) =>
+      app.inject({ method: "GET", url: `/transactions/${id}`, cookies: { bv_session: cookieValue(cookie) } });
+
+    // Holder WITH a VIEW grant on accountC (source involved account) → 200.
+    const holderRes = await tx(journalId, holder);
+    expect(holderRes.statusCode).toBe(200);
+    const body = holderRes.json();
+    expect(body.transaction.id).toBe(journalId);
+    expect(body.transaction.type).toBe("TRANSFER");
+    expect(body.transaction.status).toBe("POSTED"); // journal_transactions.status is always POSTED
+    expect(body.transaction.currencyCode).toBe("INR");
+    const postings = body.postings as Array<{
+      direction: string;
+      accountId: string;
+      amountMinor: string;
+      balanceAfterMinor: string;
+      accountEventSeq: string;
+    }>;
+    expect(postings.length).toBe(2);
+    const debit = postings.find((p) => p.direction === "DEBIT");
+    const credit = postings.find((p) => p.direction === "CREDIT");
+    expect(debit!.accountId).toBe(accountC);
+    expect(debit!.amountMinor).toBe("7777");
+    expect(typeof debit!.amountMinor).toBe("string"); // T-049
+    expect(debit!.balanceAfterMinor).toMatch(/^\d+$/);
+    expect(typeof debit!.balanceAfterMinor).toBe("string");
+    expect(typeof debit!.accountEventSeq).toBe("string");
+    expect(credit!.accountId).toBe(accountB);
+    expect(credit!.amountMinor).toBe("7777");
+    expect(body.transaction.initiatedBy?.userId).toBe(await currentActorId("holder"));
+    expect(body.transaction.initiatedBy?.displayName).toMatch(/^holder(_[0-9a-f]{10})?$/);
+    expect(JSON.stringify(body.transaction.initiatedBy?.displayName)).not.toContain("@");
+
+    // Stranger (NO grant on C) → uniform 404.
+    const strangerRes = await tx(journalId, stranger);
+    expect(strangerRes.statusCode).toBe(404);
+    expect(strangerRes.json().error.code).toBe("ACCOUNT_NOT_FOUND");
+
+    // AUDITOR → 200 (role-level visibility).
+    const auditorRes = await tx(journalId, auditor);
+    expect(auditorRes.statusCode).toBe(200);
+    expect(auditorRes.json().transaction.id).toBe(journalId);
+
+    // ADMIN → 200.
+    const adminRes = await tx(journalId, admin);
+    expect(adminRes.statusCode).toBe(200);
+    expect(adminRes.json().transaction.id).toBe(journalId);
+
+    // Unauthenticated → 401.
+    const anon = await app.inject({ method: "GET", url: `/transactions/${journalId}` });
+    expect(anon.statusCode).toBe(401);
+    expect(anon.json().error.code).toBe("UNAUTHENTICATED");
+
+    // Non-numeric id → uniform 404.
+    const weird = await tx("not-a-number", holder);
+    expect(weird.statusCode).toBe(404);
+    expect(weird.json().error.code).toBe("ACCOUNT_NOT_FOUND");
+
+    // Nonexistent id → uniform 404.
+    const missing = await tx("999999", holder);
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error.code).toBe("ACCOUNT_NOT_FOUND");
   });
 });
 
