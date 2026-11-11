@@ -84,6 +84,28 @@ describe("ledger core invariants + races (real PostgreSQL; P6.8/CON-001/IDEM-003
          VALUES ($1, $2, 'TRANSFER', $1), ($1, $2, 'WITHDRAW', $1), ($1, $2, 'VIEW', $1)`,
         [holderId, accountX],
       );
+
+      // SEED: a balanced, self-contained append-only fixture so LED-001 /
+      // LED-001b do not depend on residue left by other suites. Equal debit +
+      // credit on the same account keeps cached balance == ledger-derived total
+      // (INV-001 invariant 2); NULL account_event_seq is excluded from the
+      // gap-free counter check (invariant 3).
+      await conn.query("BEGIN");
+      const { rows: seedJournal } = await conn.query<{ id: string }>(
+        `INSERT INTO journal_transactions (type, status, currency_code, initiated_by)
+         VALUES ('DEPOSIT', 'POSTED', 'INR', $1) RETURNING id::text AS id`,
+        [holderId],
+      );
+      const seedJournalId = BigInt(seedJournal[0]!.id);
+      await conn.query(
+        `INSERT INTO ledger_entries
+           (journal_transaction_id, account_id, direction, amount_minor,
+            currency_code, balance_after_minor, account_event_seq)
+         VALUES ($1, $2, 'DEBIT', 1000, 'INR', 0, NULL),
+                ($1, $2, 'CREDIT', 1000, 'INR', 1000, NULL)`,
+        [seedJournalId, accountX],
+      );
+      await conn.query("COMMIT");
     } finally {
       await closeIndependent(conn);
     }
