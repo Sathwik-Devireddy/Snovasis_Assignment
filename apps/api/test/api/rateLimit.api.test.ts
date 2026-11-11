@@ -138,6 +138,46 @@ describe("register/login rate limiting (real Redis; RATE-001/002)", () => {
       await app2.close();
     }
   });
+
+  it("RATE-002 recovery: limiting re-engages once Redis is reachable again", async () => {
+    // Outage half: an app wired to a dead Redis degrades (fail-open)…
+    const cfg = loadConfig(process.env);
+    const deadRedis = createRedisClient({ url: "redis://127.0.0.1:9", lazyConnect: true });
+    const degradedApp = buildApp({ config: cfg, pgPool, redis: deadRedis, prisma: prismaClient() });
+    try {
+      const outEmail = `rl_rec_${randomBytes(4).toString("hex")}@test.local`;
+      const degraded = await degradedApp.inject({
+        method: "POST",
+        url: "/login",
+        headers: { "content-type": "application/json" },
+        payload: { email: outEmail, password: "whatever-credentials-are-irrelevant" },
+      });
+      expect(degraded.statusCode).toBe(401); // passed the (bypassed) limiter
+    } finally {
+      await deadRedis.quit().catch(() => undefined);
+      await degradedApp.close();
+    }
+    // Recovery half: with reachable Redis the SAME flood is limited again.
+    const limit = cfg.RATE_LIMIT_LOGIN_LIMIT;
+    const email = `rl_rec_${randomBytes(4).toString("hex")}@test.local`;
+    for (let i = 0; i < limit; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/login",
+        headers: { "content-type": "application/json" },
+        payload: { email, password: "no-such-credentials-here-at-all" },
+      });
+      expect(res.statusCode).toBe(401);
+    }
+    const over = await app.inject({
+      method: "POST",
+      url: "/login",
+      headers: { "content-type": "application/json" },
+      payload: { email, password: "yet-another-credential-attempt" },
+    });
+    expect(over.statusCode).toBe(429);
+    expect(over.json().error.code).toBe("RATE_LIMITED");
+  });
 });
 
 export type NoopTypes = Config;

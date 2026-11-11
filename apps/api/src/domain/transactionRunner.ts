@@ -101,6 +101,27 @@ async function rollbackQuietly(tx: PoolClient): Promise<void> {
   }
 }
 
+/**
+ * T-042 DB-side attempt-write cap (RATE-002's second line, Redis-independent):
+ * bounds the per-actor volume of best-effort audit rows (FAILED + D-9
+ * authorisation refusals) within a 60-second window. A capped write is skipped
+ * with a log line — it never changes the caller's response.
+ */
+async function t042AllowsAttemptWrite(tx: PoolClient, actorId: bigint): Promise<boolean> {
+  const cap = Number(process.env.T042_ATTEMPT_WRITE_CAP ?? 60);
+  const { rows } = await tx.query(
+    `SELECT COUNT(*)::int AS n FROM transaction_attempts
+      WHERE actor_id = $1 AND created_at > now() - interval '60 seconds'`,
+    [actorId],
+  );
+  const count = Number(rows[0]?.n ?? 0);
+  if (count >= cap) {
+    console.warn(`[transactionRunner] T-042 attempt-write cap reached (${count} rows/60s) — audit row skipped`);
+    return false;
+  }
+  return true;
+}
+
 /** Best-effort FAILED attempt row for infrastructure failures (D-9). */
 async function persistFailedAttempt(
   tx: PoolClient,
@@ -108,6 +129,7 @@ async function persistFailedAttempt(
   reason: string,
 ): Promise<void> {
   try {
+    if (!(await t042AllowsAttemptWrite(tx, command.actorId))) return;
     await tx.query("BEGIN");
     await tx.query(
       `INSERT INTO transaction_attempts
@@ -134,6 +156,7 @@ async function persistAuthzRefusal(
   accountId: bigint | null,
 ): Promise<void> {
   try {
+    if (!(await t042AllowsAttemptWrite(tx, command.actorId))) return;
     await tx.query("BEGIN");
     await tx.query(
       `INSERT INTO transaction_attempts
@@ -206,7 +229,87 @@ async function commitBusinessRefusal(
   throw new DomainError(refusal.externalCode, refusal.externalCode, refusal.internalReason);
 }
 
+/**
+ * Row 9 (IDEMPOTENCY_BEHAVIORS; P7.1): 40P01 (deadlock) / 40001 (serialization)
+ * are RETRIED TRANSPARENTLY — whole command, same key, claim inside the tx —
+ * up to 3 attempts total; only then does the caller see 503 LOCK_TIMEOUT.
+ * 55P03/40P02 (lock/statement timeout) are NOT retried: 503 immediately,
+ * key not consumed, retry-safe.
+ */
+const DEADLOCK_RETRY_CODES = new Set(["40P01", "40001"]);
+// 55P03/40P02: lock/statement timeouts from the pool's T-035 settings;
+// 57014: statement_timeout abort ("canceling statement due to statement
+// timeout"). None of these are retried: 503 immediately, key not consumed,
+// retry-safe.
+const TIMEOUT_CODES = new Set(["55P03", "40P02", "57014"]);
+const MAX_TX_ATTEMPTS = 3;
+
+/**
+ * Test-only fault injection (P8.7 CON-003, sanctioned by the kit's fault
+ * injection pattern): BV_TEST_FAULT_INJECT=deadlock_once makes the FIRST
+ * execution attempt on a given connection fail with a synthetic 40P01 so
+ * tests can prove the retry is transparent (same key, exactly one financial
+ * effect, no FAILED attempt row). Never set in production.
+ */
+const faultInjectedClients = new WeakSet<PoolClient>();
+
+function injectedDeadlockOnce(tx: PoolClient): Error | null {
+  if (process.env.BV_TEST_FAULT_INJECT !== "deadlock_once") return null;
+  if (faultInjectedClients.has(tx)) return null;
+  faultInjectedClients.add(tx);
+  const error = new Error("injected deadlock (BV_TEST_FAULT_INJECT)");
+  (error as { code?: string }).code = "40P01";
+  return error;
+}
+
 export async function runMoneyCommand(
+  tx: PoolClient,
+  command: MoneyCommand,
+): Promise<MoneyResult> {
+  for (let attempt = 1; ; attempt += 1) {
+    const fault = injectedDeadlockOnce(tx);
+    try {
+      if (fault !== null) throw fault;
+      return await executeMoneyTransaction(tx, command);
+    } catch (error) {
+      // Returns null only to signal a transparent retry; throws otherwise.
+      await handleMoneyCommandError(tx, command, error, attempt);
+    }
+  }
+}
+
+/**
+ * Shared classification for one failed transaction attempt: returns null to
+ * signal a TRANSPARENT RETRY (row 9); throws the caller-facing error otherwise.
+ */
+async function handleMoneyCommandError(
+  tx: PoolClient,
+  command: MoneyCommand,
+  error: unknown,
+  attempt: number,
+): Promise<null> {
+  if (error instanceof DomainError) throw error;
+  await rollbackQuietly(tx);
+  const pgCode = (error as { code?: string }).code ?? "";
+  if (DEADLOCK_RETRY_CODES.has(pgCode) && attempt < MAX_TX_ATTEMPTS) {
+    // Row 9: transparent retry — whole command, same key, claim re-run in a
+    // fresh transaction. Nothing durable happened (the loser tx rolled back).
+    return null;
+  }
+  const reason =
+    DEADLOCK_RETRY_CODES.has(pgCode) || TIMEOUT_CODES.has(pgCode)
+      ? "LOCK_TIMEOUT"
+      : "INFRA_FAILURE";
+  // Row 8/9 (final): everything rolled back, key NOT consumed, retry-safe.
+  // The FAILED attempt row is best-effort (D-9) and never suppresses the error.
+  await persistFailedAttempt(tx, command, reason);
+  if (reason === "LOCK_TIMEOUT") {
+    throw new DomainError("LOCK_TIMEOUT", "LOCK_TIMEOUT");
+  }
+  throw error instanceof Error ? error : new DomainError("INFRA_FAILURE", "INFRA_FAILURE");
+}
+
+async function executeMoneyTransaction(
   tx: PoolClient,
   command: MoneyCommand,
 ): Promise<MoneyResult> {
@@ -471,6 +574,13 @@ export async function runMoneyCommand(
         status: String(r.status) as LockedAccount["status"],
         balanceMinor: r.balance_minor === null ? null : BigInt(r.balance_minor),
       });
+      // Test-only hook (P8.10 mutation-B experiment): pause after the FIRST
+      // account row is locked so a reversed-order CON-002 run deterministically
+      // forms a lock cycle. Never set in production.
+      const pauseMs = Number(process.env.BV_TEST_LOCK_PAUSE_MS ?? 0);
+      if (pauseMs > 0 && lockedById.size === 1) {
+        await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      }
     }
 
     // Allocate one event per involved CUSTOMER account (postings AND locked
@@ -627,18 +737,8 @@ export async function runMoneyCommand(
     await tx.query("COMMIT");
     return { journalTransactionId, replayed: false };
   } catch (error) {
-    if (error instanceof DomainError) throw error;
-    await rollbackQuietly(tx);
-    const pgCode = (error as { code?: string }).code;
-    const reason =
-      pgCode === "40P01" || pgCode === "40001" || pgCode === "40P02" ? "LOCK_TIMEOUT" : "INFRA_FAILURE";
-    // Row 8/9: everything rolled back, key NOT consumed, retry-safe. The
-    // FAILED attempt row is best-effort (D-9) and never suppresses the error.
-    await persistFailedAttempt(tx, command, reason);
-    if (reason === "LOCK_TIMEOUT") {
-      throw new DomainError("LOCK_TIMEOUT", "LOCK_TIMEOUT");
-    }
-    throw error instanceof Error ? error : new DomainError("INFRA_FAILURE", "INFRA_FAILURE");
+    // The retry wrapper owns classification, rollback and D-9 FAILED rows.
+    throw error;
   }
 }
 

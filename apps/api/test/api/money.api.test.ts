@@ -594,6 +594,119 @@ describe("money endpoints (real services; PHASE-06 P6.9)", () => {
       await closeIndependent(conn);
     }
   });
+
+  it("IDEM-004: the same key STRING from another user is a DIFFERENT scoped key — independent results", async () => {
+    // Scope of a key is UNIQUE(actor_id, operation, idempotency_key)
+    // (IDEMPOTENCY_BEHAVIORS row scope note). The holder and the stranger both
+    // send the identical key string for the same operation on the same account:
+    // each actor gets an independent claim, journal and replay — the stranger's
+    // call must NOT replay the holder's stored success.
+    await grant("WITHDRAW", accountA, fixture.strangerEmail);
+    const key = `idem4_${randomBytes(4).toString("hex")}`;
+    const call = (cookie: string) =>
+      app.inject({
+        method: "POST",
+        url: `/accounts/${accountA}/withdrawals`,
+        cookies: { bv_session: cookieValue(cookie) },
+        headers: { "idempotency-key": key },
+        payload: { amountMinor: "500", currencyCode: "INR" },
+      });
+
+    const holder = await holderCookie();
+    const stranger = await strangerCookie();
+    const first = await call(holder);
+    expect(first.statusCode).toBe(200);
+    expect(first.json().replayed).toBe(false);
+    const second = await call(stranger);
+    expect(second.statusCode).toBe(200);
+    expect(second.json().replayed).toBe(false);
+    // Independent results: two distinct journals for the two actors.
+    const holderJournal = first.json().journalTransactionId;
+    const strangerJournal = second.json().journalTransactionId;
+    expect(strangerJournal).not.toBe(holderJournal);
+
+    // Each actor replays THEIR OWN stored outcome under the same key string.
+    const holderReplay = await call(holder);
+    expect(holderReplay.statusCode).toBe(200);
+    expect(holderReplay.json().replayed).toBe(true);
+    expect(holderReplay.json().journalTransactionId).toBe(holderJournal);
+    const strangerReplay = await call(stranger);
+    expect(strangerReplay.statusCode).toBe(200);
+    expect(strangerReplay.json().replayed).toBe(true);
+    expect(strangerReplay.json().journalTransactionId).toBe(strangerJournal);
+
+    // Stored truth: TWO idempotency rows share the key string, one per actor.
+    const conn = await independentConnection(appConnectionString());
+    try {
+      const { rows } = await conn.query<{ rows: string; debits: string }>(
+        `SELECT
+           (SELECT COUNT(*)::text FROM idempotency_records WHERE idempotency_key = $1) AS rows,
+           (SELECT COALESCE(SUM(amount_minor), 0)::text FROM ledger_entries
+             WHERE account_id = $2 AND direction = 'DEBIT'
+               AND journal_transaction_id IN (
+                 SELECT journal_transaction_id FROM idempotency_records WHERE idempotency_key = $1)) AS debits`,
+        [key, BigInt(accountA)],
+      );
+      expect(rows[0]).toEqual({ rows: "2", debits: "1000" });
+    } finally {
+      await closeIndependent(conn);
+    }
+  });
+
+  it("T-042: the DB-side attempt-write cap bounds per-actor D-9 rows without touching responses", async () => {
+    // RATE-002's second line: a fresh actor flooding forbidden calls gets at
+    // most CAP authorisation-refusal attempt rows in the window; every HTTP
+    // response is still the full uniform 404 (the cap is audit-side only).
+    const previousCap = process.env.T042_ATTEMPT_WRITE_CAP;
+    process.env.T042_ATTEMPT_WRITE_CAP = "2";
+    const password = `t042-pw-${randomBytes(8).toString("hex")}-0123456789`;
+    const email = `t042_${fixture.suffix}@test.local`; // afterAll disables it
+    const conn = await independentConnection(appConnectionString());
+    let actorId = "";
+    try {
+      const { rows } = await conn.query(
+        `INSERT INTO users (email, password_hash, role, status)
+         VALUES ($1, $2, 'ACCOUNT_HOLDER', 'ACTIVE') RETURNING id::text AS id`,
+        [email, await hashPassword(password)],
+      );
+      actorId = rows[0]!.id;
+    } finally {
+      await closeIndependent(conn);
+    }
+
+    try {
+      const session = await login(email, password);
+      for (let i = 0; i < 3; i++) {
+        const res = await app.inject({
+          method: "POST",
+          url: `/accounts/${accountA}/deposits`, // deposits are admin-only
+          cookies: { bv_session: cookieValue(session) },
+          headers: { "idempotency-key": `t042_${i}_${randomBytes(4).toString("hex")}` },
+          payload: { amountMinor: "100", currencyCode: "INR" },
+        });
+        // The cap never changes the caller's response: full uniform 404 every time.
+        expect(res.statusCode).toBe(404);
+        expect(res.json().error.code).toBe("ACCOUNT_NOT_FOUND");
+      }
+      const check = await independentConnection(appConnectionString());
+      try {
+        const { rows } = await check.query<{ refused: string; failed: string }>(
+          `SELECT
+             COUNT(*) FILTER (WHERE status = 'REFUSED')::text AS refused,
+             COUNT(*) FILTER (WHERE status = 'FAILED')::text AS failed
+           FROM transaction_attempts WHERE actor_id = $1`,
+          [BigInt(actorId)],
+        );
+        // Cap = 2, three refused calls → exactly 2 durable D-9 rows.
+        expect(rows[0]).toEqual({ refused: "2", failed: "0" });
+      } finally {
+        await closeIndependent(check);
+      }
+    } finally {
+      if (previousCap === undefined) delete process.env.T042_ATTEMPT_WRITE_CAP;
+      else process.env.T042_ATTEMPT_WRITE_CAP = previousCap;
+    }
+  });
 });
 
 /** Cookie header value from a Set-Cookie string. */

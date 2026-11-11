@@ -8,6 +8,7 @@ import {
 } from "../harness.js";
 import { runMoneyCommand } from "../../src/domain/transactionRunner.js";
 import { canonicalHash } from "../../src/domain/money.js";
+import { assertGlobalInvariants } from "../../src/domain/invariants.js";
 import { DomainError } from "../../src/http/errors.js";
 
 /**
@@ -89,6 +90,9 @@ describe("ledger core invariants + races (real PostgreSQL; P6.8/CON-001/IDEM-003
   }, 40_000);
 
   afterAll(async () => {
+    // Users are lifecycle rows: DISABLE them FIRST so the cleanup runs even if
+    // the invariant check below fails (a skipped cleanup leaves active fixture
+    // users that break other suites running against the same dev database).
     const conn = await independentConnection(appConnectionString());
     try {
       await conn.query(
@@ -97,6 +101,16 @@ describe("ledger core invariants + races (real PostgreSQL; P6.8/CON-001/IDEM-003
       );
     } finally {
       await closeIndependent(conn);
+    }
+    // INV-001 over the whole authoritative ledger after the suite's races:
+    // gap-free shared event counter per account, stored == ledger-derived
+    // balances, every journal balanced (P6.7 / src/domain/invariants.ts).
+    const inv = await independentConnection(appConnectionString());
+    try {
+      const report = await assertGlobalInvariants(inv);
+      expect(report.violations).toEqual([]);
+    } finally {
+      await closeIndependent(inv);
     }
   }, 40_000);
 
@@ -349,6 +363,268 @@ describe("ledger core invariants + races (real PostgreSQL; P6.8/CON-001/IDEM-003
       await closeIndependent(conn);
     }
   }, 40_000);
+
+  it("IDEM-005: lost response — commit succeeds, client retries with the SAME key, stored result replays", async () => {
+    // Row 10: commit succeeded, response lost. The prescribed client behavior
+    // is a retry with the SAME key — the replay gate returns the stored
+    // outcome marked replayed: true, with NO second journal.
+    const conn = await independentConnection(appConnectionString());
+    const key = `idem005_${randomBytes(4).toString("hex")}`;
+    const command = () => ({
+      operation: "DEPOSIT" as const,
+      idempotencyKey: key,
+      requestHash: canonicalHash({ op: "DEPOSIT", amount: "750", currency: "INR", key }),
+      actorId: adminId,
+      sessionId: adminSessionId,
+      destinationAccountId: accountY,
+      amount: 750n,
+      currencyCode: "INR",
+    });
+    try {
+      const first = await runMoneyCommand(conn, command());
+      expect(first.replayed).toBe(false);
+      // The "lost response": a fresh sequential execution on the SAME key.
+      const retryConn = await independentConnection(appConnectionString());
+      try {
+        const retry = await runMoneyCommand(retryConn, command());
+        expect(retry.replayed).toBe(true);
+        expect(retry.journalTransactionId).toBe(first.journalTransactionId);
+      } finally {
+        await closeIndependent(retryConn);
+      }
+      // Stored truth: exactly one idempotency row; exactly one 750 credit.
+      const check = await independentConnection(appConnectionString());
+      try {
+        const { rows } = await check.query<{ keys: string; journals: string; credited: string }>(
+          `SELECT
+             (SELECT COUNT(*)::text FROM idempotency_records WHERE idempotency_key = $1) AS keys,
+             (SELECT COUNT(DISTINCT journal_transaction_id)::text FROM ledger_entries
+               WHERE journal_transaction_id IN
+                 (SELECT journal_transaction_id FROM idempotency_records WHERE idempotency_key = $1)) AS journals,
+             (SELECT COALESCE(SUM(amount_minor), 0)::text FROM ledger_entries
+               WHERE account_id = $2 AND direction = 'CREDIT'
+                 AND journal_transaction_id IN
+                   (SELECT journal_transaction_id FROM idempotency_records WHERE idempotency_key = $1)) AS credited`,
+          [key, accountY],
+        );
+        expect(rows[0]).toEqual({ keys: "1", journals: "1", credited: "750" });
+      } finally {
+        await closeIndependent(check);
+      }
+    } finally {
+      await closeIndependent(conn);
+    }
+  }, 40_000);
+
+  it("CON-002: many opposite-direction transfers — no deadlock surfaces, totals exact", async () => {
+    // P8.6: A→B and B→A racing on independent connections. Ascending-id
+    // locking makes a cycle impossible; row-9 retry is the second belt.
+    const transfers = 12;
+    const mkConn = async (from: bigint, to: bigint, i: number) => {
+      const conn = await independentConnection(appConnectionString());
+      try {
+        return await runMoneyCommand(conn, {
+          operation: "TRANSFER",
+          idempotencyKey: `con2_${i}_${randomBytes(3).toString("hex")}`,
+          requestHash: canonicalHash({ op: "TRANSFER", from: from.toString(), to: to.toString(), i: String(i) }),
+          actorId: holderId,
+          sessionId: holderSessionId,
+          sourceAccountId: from,
+          destinationAccountId: to,
+          amount: 10n,
+          currencyCode: "INR",
+        });
+      } finally {
+        await closeIndependent(conn);
+      }
+    };
+    // Both directions need TRANSFER on the source; grant it on accountY too.
+    const grantConn = await independentConnection(appConnectionString());
+    try {
+      await grantConn.query(
+        `INSERT INTO account_permissions (user_id, account_id, permission, granted_by)
+         VALUES ($1, $2, 'TRANSFER', $1)`,
+        [holderId, accountY],
+      );
+    } finally {
+      await closeIndependent(grantConn);
+    }
+    // Fund accountY enough for 6 outgoing transfers (setup via admin deposit).
+    const fund = await independentConnection(appConnectionString());
+    try {
+      await runMoneyCommand(fund, {
+        operation: "DEPOSIT",
+        idempotencyKey: `con2_fund_${randomBytes(4).toString("hex")}`,
+        requestHash: canonicalHash({ op: "DEPOSIT", seed: randomBytes(4).toString("hex") }),
+        actorId: adminId,
+        sessionId: adminSessionId,
+        destinationAccountId: accountY,
+        amount: 100n,
+        currencyCode: "INR",
+      });
+    } finally {
+      await closeIndependent(fund);
+    }
+
+    const jobs: Array<Promise<{ journalTransactionId: bigint; replayed: boolean }>> = [];
+    for (let i = 0; i < transfers; i++) {
+      // Alternate directions: even i A→B, odd i B→A.
+      jobs.push(i % 2 === 0 ? mkConn(accountX, accountY, i) : mkConn(accountY, accountX, i));
+    }
+    const results = await Promise.allSettled(jobs);
+    const outcomes = results.map((r) => (r.status === "fulfilled" ? "SUCCEEDED" : reasonOf(r.reason)));
+    // No deadlock (40P01) or serialization failure may surface to callers.
+    expect(outcomes.filter((o) => o === "LOCK_TIMEOUT")).toEqual([]);
+    expect(outcomes.filter((o) => o.startsWith("injected") || o.includes("deadlock"))).toEqual([]);
+    // Every transfer either succeeded or was legitimately refused for funds.
+    for (const o of outcomes) {
+      expect(["SUCCEEDED", "INSUFFICIENT_FUNDS"]).toContain(o);
+    }
+    // Totals: net customer movement is zero per transfer pair; stored balances
+    // still equal ledger-derived totals (the real CON-002 assertion).
+    const conn = await independentConnection(appConnectionString());
+    try {
+      const { rows } = await conn.query<{ mismatches: string; unbalanced: string }>(
+        `SELECT
+           (SELECT COUNT(*)::text FROM (
+              SELECT a.id FROM accounts a
+              WHERE a.kind = 'CUSTOMER'
+                AND a.balance_minor <> (COALESCE((SELECT SUM(amount_minor) FROM ledger_entries
+                     WHERE account_id = a.id AND direction = 'CREDIT'), 0)
+                     - COALESCE((SELECT SUM(amount_minor) FROM ledger_entries
+                     WHERE account_id = a.id AND direction = 'DEBIT'), 0))
+            ) AS m) AS mismatches,
+           (SELECT COUNT(*)::text FROM (
+              SELECT journal_transaction_id FROM ledger_entries
+              GROUP BY journal_transaction_id
+              HAVING COALESCE(SUM(amount_minor) FILTER (WHERE direction='DEBIT'), 0)
+                  <> COALESCE(SUM(amount_minor) FILTER (WHERE direction='CREDIT'), 0)
+            ) AS u) AS unbalanced`,
+      );
+      expect(rows[0]).toEqual({ mismatches: "0", unbalanced: "0" });
+    } finally {
+      await closeIndependent(conn);
+    }
+  }, 60_000);
+
+  it("CON-003: forced serialization/deadlock failure — runner retries transparently with the SAME key, exactly one effect", async () => {
+    // P8.7 via the sanctioned fault-injection hook: the first execution
+    // attempt fails with a synthetic 40P01; the row-9 retry re-runs the WHOLE
+    // command (same key) in a fresh transaction and succeeds.
+    const previousEnv = process.env.BV_TEST_FAULT_INJECT;
+    process.env.BV_TEST_FAULT_INJECT = "deadlock_once";
+    const conn = await independentConnection(appConnectionString());
+    const key = `con3_${randomBytes(4).toString("hex")}`;
+    const command = () => ({
+      operation: "DEPOSIT" as const,
+      idempotencyKey: key,
+      requestHash: canonicalHash({ op: "DEPOSIT", amount: "125", currency: "INR", key }),
+      actorId: adminId,
+      sessionId: adminSessionId,
+      destinationAccountId: accountY,
+      amount: 125n,
+      currencyCode: "INR",
+    });
+    try {
+      const result = await runMoneyCommand(conn, command());
+      expect(result.replayed).toBe(false);
+    } finally {
+      if (previousEnv === undefined) delete process.env.BV_TEST_FAULT_INJECT;
+      else process.env.BV_TEST_FAULT_INJECT = previousEnv;
+      await closeIndependent(conn);
+    }
+    // Exactly ONE financial effect; and the retried attempt left NO FAILED
+    // attempt row (the retry is transparent, not an infrastructure failure).
+    const check = await independentConnection(appConnectionString());
+    try {
+      const { rows } = await check.query<{ keys: string; credited: string; failed: string }>(
+        `SELECT
+           (SELECT COUNT(*)::text FROM idempotency_records WHERE idempotency_key = $1) AS keys,
+           (SELECT COALESCE(SUM(amount_minor), 0)::text FROM ledger_entries
+             WHERE account_id = $2 AND direction = 'CREDIT'
+               AND journal_transaction_id IN
+                 (SELECT journal_transaction_id FROM idempotency_records WHERE idempotency_key = $1)) AS credited,
+           (SELECT COUNT(*)::text FROM transaction_attempts
+             WHERE actor_id = $3 AND status = 'FAILED' AND reason_code = 'LOCK_TIMEOUT') AS failed`,
+        [key, accountY, adminId],
+      );
+      expect(rows[0]).toEqual({ keys: "1", credited: "125", failed: "0" });
+    } finally {
+      await closeIndependent(check);
+    }
+  }, 40_000);
+
+  it("CON-004: 50 concurrent deposits to different AND same accounts — exact totals, no stall", async () => {
+    // P7.9: many deposits in parallel on independent connections. The clearing
+    // account is NEVER locked, so there is no global serialisation point.
+    const accounts = [accountX, accountY];
+    // Distribute 50 deposits round-robin over the two accounts.
+    const jobs: Array<{ account: bigint; amount: bigint; index: number }> = [];
+    for (let i = 0; i < 50; i++) {
+      jobs.push({ account: accounts[i % accounts.length]!, amount: 100n, index: i });
+    }
+    const started = Date.now();
+    const results = await Promise.allSettled(
+      jobs.map(async (job) => {
+        const conn = await independentConnection(appConnectionString());
+        try {
+          return await runMoneyCommand(conn, {
+            operation: "DEPOSIT",
+            idempotencyKey: `con4_${job.index}_${randomBytes(3).toString("hex")}`,
+            requestHash: canonicalHash({ op: "DEPOSIT", i: String(job.index) }),
+            actorId: adminId,
+            sessionId: adminSessionId,
+            destinationAccountId: job.account,
+            amount: job.amount,
+            currencyCode: "INR",
+          });
+        } finally {
+          await closeIndependent(conn);
+        }
+      }),
+    );
+    const elapsed = Date.now() - started;
+    const outcomes = results.map((r) => (r.status === "fulfilled" ? "SUCCEEDED" : reasonOf(r.reason)));
+    // No stall: every deposit resolved well inside the harness timeouts.
+    expect(elapsed).toBeLessThan(35_000);
+    // Exact totals: all 50 succeeded; each account credited exactly its share.
+    expect(outcomes.filter((o) => o !== "SUCCEEDED")).toEqual([]);
+    const expected = new Map<bigint, bigint>();
+    for (const job of jobs) {
+      expected.set(job.account, (expected.get(job.account) ?? 0n) + job.amount);
+    }
+    const conn = await independentConnection(appConnectionString());
+    try {
+      const { rows } = await conn.query<{ account_id: string; credited: string }>(
+        `SELECT account_id::text AS account_id,
+                COALESCE(SUM(amount_minor) FILTER (WHERE direction = 'CREDIT'), 0)::text AS credited
+           FROM ledger_entries
+          WHERE journal_transaction_id IN (
+            SELECT journal_transaction_id FROM idempotency_records
+             WHERE idempotency_key LIKE 'con4_%' AND operation = 'DEPOSIT'
+               AND response_status = 200)
+          GROUP BY account_id`,
+      );
+      const credited = new Map(rows.map((r) => [BigInt(r.account_id), BigInt(r.credited)]));
+      for (const [account, total] of expected) {
+        expect(credited.get(account) ?? 0n).toBe(total);
+      }
+    } finally {
+      await closeIndependent(conn);
+    }
+  }, 60_000);
+
+  it("INV-001: assertGlobalInvariants reports zero violations over the authoritative ledger", async () => {
+    const conn = await independentConnection(appConnectionString());
+    try {
+      const report = await assertGlobalInvariants(conn);
+      expect(report.journalsChecked).toBeGreaterThan(0);
+      expect(report.accountsChecked).toBeGreaterThan(0);
+      expect(report.violations).toEqual([]);
+    } finally {
+      await closeIndependent(conn);
+    }
+  });
 });
 
 /** Extract the refusal code from a rejected runner promise (DomainError). */
