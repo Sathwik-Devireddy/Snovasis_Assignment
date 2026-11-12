@@ -14,9 +14,54 @@ import { verifyPassword } from "../../src/infrastructure/argon2.js";
  * Because bootstrap is disabled once ANY ADMIN exists, the suite deletes the
  * rows of ITS marker family through the superuser connection (bootstrap role)
  * both before (idempotent across runs) and after (clean dev database).
+ *
+ * BOOT-001 additionally needs "no administrator exists AT ALL" — including an
+ * administrator left by a deployment (the demo seed) or by another suite. The
+ * helper below parks every other active administrator for the duration of the
+ * test and restores it afterwards, so the assertion is about the SCRIPT's
+ * behaviour, not about the state the database happened to be in. Without it the
+ * suite only passes on a pristine database.
  */
 
 const markerPrefix = "bootstrapt_";
+
+/**
+ * Disable every active administrator except the ones in `keepEmails`, and
+ * return a restore function. Used to make "the only administrator" and
+ * "no administrator exists" deterministic in a shared database.
+ */
+async function parkOtherAdmins(keepEmails: string[] = []): Promise<() => Promise<void>> {
+  const superuser = await independentConnection(bootstrapConnectionString());
+  try {
+    const { rows } = await superuser.query<{ id: string; email: string }>(
+      `SELECT id::text AS id, email FROM users
+        WHERE role = 'ADMIN' AND status = 'ACTIVE' AND NOT (email = ANY($1::text[]))`,
+      [keepEmails],
+    );
+    const ids = rows.map((r) => r.id);
+    if (ids.length > 0) {
+      await superuser.query(
+        `UPDATE users SET status = 'DISABLED' WHERE id = ANY($1::bigint[])`,
+        [ids],
+      );
+    }
+    return async () => {
+      const restore = await independentConnection(bootstrapConnectionString());
+      try {
+        if (ids.length > 0) {
+          await restore.query(
+            `UPDATE users SET status = 'ACTIVE' WHERE id = ANY($1::bigint[])`,
+            [ids],
+          );
+        }
+      } finally {
+        await closeIndependent(restore);
+      }
+    };
+  } finally {
+    await closeIndependent(superuser);
+  }
+}
 
 function runBootstrap(env: Record<string, string | undefined>): ReturnType<typeof spawnSync> {
   const merged = {
@@ -66,7 +111,17 @@ describe("first-admin bootstrap host command (real subprocesses; BOOT-001/002)",
   it("creates the FIRST admin from env secrets: argon2id at rest, bootstrap_created audit event (BOOT-001)", async () => {
     const password = `host-generated-pw-${randomBytes(8).toString("hex")}-0123456789`;
     const email = `${markerPrefix}${randomBytes(5).toString("hex")}@test.local`;
-    const run = runBootstrap({ BOOTSTRAP_ADMIN_EMAIL: email, BOOTSTRAP_ADMIN_PASSWORD: password });
+    // "First" means FIRST: any other administrator in this database (a
+    // deployment's admin, another suite's leftover) is parked for the test and
+    // restored afterwards, so the assertion is about the script, not about the
+    // state the shared database happened to be in.
+    const restoreAdmins = await parkOtherAdmins();
+    let run: ReturnType<typeof runBootstrap>;
+    try {
+      run = runBootstrap({ BOOTSTRAP_ADMIN_EMAIL: email, BOOTSTRAP_ADMIN_PASSWORD: password });
+    } finally {
+      await restoreAdmins();
+    }
 
     expect(run.status).toBe(0);
     expect(run.stdout).toContain("bootstrap complete");
@@ -96,9 +151,19 @@ describe("first-admin bootstrap host command (real subprocesses; BOOT-001/002)",
 
   it("refuses when an admin already exists — one environment, one bootstrap (BOOT-002)", async () => {
     await purgeMarkerFamily(); // self-contained: BOOT-001's admin must not leak into this test
-    const first = runBootstrap({});
+    // The first bootstrap of this test needs "no administrator exists" (the
+    // second one then creates the precondition for the refusal) — park any
+    // other administrator for the duration, as in BOOT-001.
+    const restoreAdmins = await parkOtherAdmins();
+    let first: ReturnType<typeof runBootstrap>;
+    let second: ReturnType<typeof runBootstrap>;
+    try {
+      first = runBootstrap({});
+      second = runBootstrap({}); // fresh email; still refused (any ADMIN exists)
+    } finally {
+      await restoreAdmins();
+    }
     expect(first.status).toBe(0);
-    const second = runBootstrap({}); // fresh email; still refused (any ADMIN exists)
     expect(second.status).toBe(1);
     expect(second.stderr).toContain("Refusing to bootstrap");
     expect(second.stderr).toContain("rotate-admin-credentials"); // points to the distinct procedure

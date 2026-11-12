@@ -34,14 +34,46 @@ type Seed = {
   teardown: () => Promise<void>;
 };
 
+/**
+ * Disable every active administrator except those in `keepEmails` and return a
+ * restore function. The last-admin guard only means something when exactly one
+ * administrator is active, so the test controls that precondition instead of
+ * assuming a pristine database.
+ */
+async function parkOtherAdmins(keepEmails: string[] = []): Promise<() => Promise<void>> {
+  const conn = await independentConnection(appConnectionString());
+  let ids: string[] = [];
+  try {
+    const { rows } = await conn.query<{ id: string }>(
+      `SELECT id::text AS id FROM users
+        WHERE role = 'ADMIN' AND status = 'ACTIVE' AND NOT (email = ANY($1::text[]))`,
+      [keepEmails],
+    );
+    ids = rows.map((r) => r.id);
+    if (ids.length > 0) {
+      await conn.query(`UPDATE users SET status = 'DISABLED' WHERE id = ANY($1::bigint[])`, [ids]);
+    }
+  } finally {
+    await closeIndependent(conn);
+  }
+  return async () => {
+    if (ids.length === 0) return;
+    const restore = await independentConnection(appConnectionString());
+    try {
+      await restore.query(`UPDATE users SET status = 'ACTIVE' WHERE id = ANY($1::bigint[])`, [ids]);
+    } finally {
+      await closeIndependent(restore);
+    }
+  };
+}
+
 async function insertUser(
   conn: Awaited<ReturnType<typeof independentConnection>>,
   email: string,
   passwordHash: string,
   role: string,
   status: string,
-): Promise<string> {
-  const { rows } = await conn.query(
+): Promise<string> {  const { rows } = await conn.query(
     "INSERT INTO users (email, password_hash, role, status) VALUES ($1, $2, $3, $4) RETURNING id",
     [email, passwordHash, role, status],
   );
@@ -223,13 +255,24 @@ describe("admin user & permission management (real services; AUTHZ_MATRIX §B)",
   });
 
   it("last-admin guard: demoting the only active ADMIN is refused (ADMIN-001)", async () => {
-    const cookie = await adminCookie();
-    const res = await app.inject({
-      method: "PATCH",
-      url: `/users/${seed.adminId}/role`,
-      headers: { "content-type": "application/json", cookie: cookie },
-      payload: { role: "ACCOUNT_HOLDER" },
-    });
+    // "The only active ADMIN" must be TRUE for the guard to be exercised, so
+    // every other administrator in this shared database (a deployment's admin,
+    // another suite's leftover) is parked for the duration and restored
+    // afterwards. Without this the test silently stops testing the guard
+    // whenever the database already holds an administrator.
+    const restoreAdmins = await parkOtherAdmins([seed.adminEmail]);
+    let res: Awaited<ReturnType<typeof app.inject>>;
+    try {
+      const cookie = await adminCookie();
+      res = await app.inject({
+        method: "PATCH",
+        url: `/users/${seed.adminId}/role`,
+        headers: { "content-type": "application/json", cookie: cookie },
+        payload: { role: "ACCOUNT_HOLDER" },
+      });
+    } finally {
+      await restoreAdmins();
+    }
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe("LAST_ADMIN_PROTECTED");
 
