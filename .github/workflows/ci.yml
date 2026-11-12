@@ -68,10 +68,12 @@ jobs:
   web:
     runs-on: ubuntu-latest
     env:
-      NODE_ENV: production
       # master-stabilisation 4.1: the production build REQUIRES the internal
       # API origin — a missing/malformed value fails the build fast instead of
       # silently proxying production traffic to localhost.
+      # NOTE: NODE_ENV is deliberately NOT set here: npm omits devDependencies
+      # when NODE_ENV=production, which would leave eslint/vitest uninstalled.
+      # `next build` sets NODE_ENV=production for the build process itself.
       API_INTERNAL_URL: http://api:4000
     defaults:
       run:
