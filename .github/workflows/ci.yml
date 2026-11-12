@@ -64,3 +64,31 @@ jobs:
         run: npm run db:migrate
       - name: Test (real PostgreSQL + Redis)
         run: npm test
+
+  web:
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: production
+      # master-stabilisation 4.1: the production build REQUIRES the internal
+      # API origin — a missing/malformed value fails the build fast instead of
+      # silently proxying production traffic to localhost.
+      API_INTERNAL_URL: http://api:4000
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm install
+      - name: Lint
+        run: npm run lint -w apps/web
+      - name: Typecheck
+        run: npm run typecheck -w apps/web
+      - name: Unit tests
+        run: npm run test -w apps/web
+      - name: Production build
+        run: npm run build -w apps/web

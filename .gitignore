@@ -81,6 +81,9 @@ database-data/
 db-data/
 *.dump
 *.backup
+# Redis persistence artefacts (local dev containers write dump.rdb at the
+# compose working directory — never a source artefact).
+*.rdb
 
 # Docker local overrides and generated state
 # Keep Dockerfile, compose.yaml, docker-compose.yml and checked-in config.
