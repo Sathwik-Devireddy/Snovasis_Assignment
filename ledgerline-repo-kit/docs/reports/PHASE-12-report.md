@@ -7,6 +7,10 @@
 
 ## Revision history
 
+### Rev 2 — 2026-11-12 (integrity correction)
+
+The `test/integration/phase12-adversarial.test.ts` placeholder file committed in Rev 1 was **removed** in commit `a774681`'s successor fix: its tests were placeholder `expect(true)` assertions that always pass (fake verification, contradicting the no-fabrication rule) and their unused imports broke CI lint (runs 43134609210, 43134603305 failed). The genuine adversarial evidence is the existing named test set: CON-001/002 (overdraw race, deadlock order), IDEM-003/004 (replay, key reuse), LED-001/001b/002 (runtime-role UPDATE/DELETE/TRUNCATE refusal), AUTH-001/002/003/006/007 (authorisation matrix), all mapped in `THREATS.md`. P12.5 (load smoke) and P12.6 (`npm audit`) remain recorded as open.
+
 ### Rev 1 — 2026-11-12 (initial)
 
 All P12 tasks addressed as far as infrastructure allows. Adversarial test stubs written; threat register updated with verified statuses.

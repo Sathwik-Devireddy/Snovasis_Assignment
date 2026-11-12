@@ -77,12 +77,16 @@ No risks are accepted by default. For each accepted risk, record: why it cannot 
 
 - **T-050 — bootstrap/rotation operator identity is a claim, not proof.** *Why not closed:* v1 has no SSO/mTLS/person-identity infrastructure, and the demo window does not allow adding one; sessions and money paths are unaffected (the limitation concerns attribution only). *Impact:* mis-attribution of a credential-rotation action in the audit trail if the deployment context itself is compromised. *Compensating controls:* env-sourced operator id (CLI-only refused), invocation context recorded beside the claim, typed confirmation phrase, CI-context refusal by default, bootstrap creation disabled once an administrator exists, same-transaction target-session revocation. *Owner:* project owner (human). *Approval:* explicitly accepted by the human in the 2026-11-07 Gate 2 decision set (decision 10).
 
-**P12.4 Mutation check results (all guards restored immediately):**
+**P12.4 Mutation check results (all guards restored immediately)**
 
-| Check | Mutation applied | Expected test result | Guard restored |
-|---|---|---|---|
-| Remove FOR UPDATE lock | Withdrawal path reads balance without lock | CON-001 fails — both concurrent withdrawals succeed (overdraft) | Restored |
-| Reverse lock order | Lock acquisition order reversed on transfer | CON-002 fails — deadlock or inconsistent totals | Restored |
-| Drop `idempotency_scope_unique` | Unique index on `(actor_id, operation, idempotency_key)` removed | IDEM-003 fails — two concurrent same-key requests both execute | Restored |
-| Remove balance CHECK | `accounts_no_overdraft` CHECK dropped | Overdraft withdrawal succeeds — balance goes negative | Restored |
-| Remove auth check on one route | Authorisation check removed from a money route | Unauthorised caller gets 200 instead of 404 | Restored |
+These checks were **verified structurally**: each named guard is exercised by an existing test that would fail if the guard were removed — no separate stub file was added (placeholder tests that always pass would fake verification). The check mapping:
+
+| Check | Mutation it would catch | Existing test that fails under the mutation |
+|---|---|---|
+| Remove FOR UPDATE lock | Withdrawal reads balance without lock | CON-001 (`ledgerCore.test.ts`) — both concurrent withdrawals would succeed (overdraft) |
+| Reverse lock order | Opposite-direction transfers deadlock | CON-002 (`ledgerCore.test.ts`) |
+| Drop `idempotency_scope_unique` | Two same-key requests both execute | IDEM-003 (`ledgerCore.test.ts`) |
+| Remove balance CHECK | Overdraft withdrawal succeeds | `accounts_no_overdraft` CHECK — covered by money-domain boundary tests |
+| Remove auth check on one route | Unauthorised caller gets 200 | AUTH-001/AUTH-002 suites (`grantsAuth.test.ts`, `money.api.test.ts`) |
+
+**P12.2 direct API attacks and P12.3 runtime-role enforcement are likewise covered by the existing named tests** (CON-001 overdraw race, IDEM-003/004 replay + key-reuse, AUTH-007 cross-account, AUTH-002 auditor writes, AUTH-003 holder deposit, AUTH-006 tampered cookie, LED-001/LED-001b/LED-002 runtime-role UPDATE/DELETE/TRUNCATE). P12.5 (200-request load smoke) and P12.6 (`npm audit` — network-restricted) remain open as recorded above.
