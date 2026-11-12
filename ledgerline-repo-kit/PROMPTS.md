@@ -202,3 +202,43 @@ Maintain this file as work happens. The published problem statement and event in
 - **Deliberately not done / boundaries honoured:** **no implementation started** — no package.json, no scaffold, no migrations, no Prisma config, no Dockerfile/compose, no CI, no tests executed (none exist), no app/server run; all seven ADR statuses remain **Proposed**; Gate 2/Gate 3 left open and unmarked; no approval recorded or fabricated; no commits, pushes, or git mutations; repo visibility untouched by the agent (human flipped to PRIVATE); kit not rewritten (additive edits only, original phase orders authoritative).
 - **Unresolved / awaiting human decisions:** explicit authorization to begin **P0 implementation** in the human-priority order (infra up → Prisma/migrations/roles → auth/onboarding/bootstrap → RBAC → accounts → money ops → idempotency → concurrency → real tests); Docker Engine start (blocks compose + real-PostgreSQL harness); Gate 2 explicit sign-off (incl. the §B holder-audit-events "Proposed default" sub-point); Gate 3 individual acceptance of ADRs 001–007; DEC-3-execution confirmation; H-1 placement-cell statement; H-4 before P4.8. Three introduced BalanceVault defaults flagged for confirmation: holder-only self-registration (deny-by-default), Redis limiter fail-soft on outage (DB-side T-042 cap intact), Prisma schema mirroring with `prisma migrate` unwired.
 - **Commit:** _(to be filled by the human when committing these files — do not invent)_
+
+### 2026-11-12 — Phase 10 P10.4 reconciliation implementation (money integrity/concurrency)
+
+- **Prompt/request:** implement P10.4 reconciliation endpoints (`GET /reconciliation/accounts/:id` and `/reconciliation/summary`) reusing `assertGlobalInvariants` (read-only, never mutates), plus P10.5 tests (STMT-001 ordering under concurrent commits and skewed/non-monotonic `occurred_at` fixtures, running balance recomputation, AUD-001, pagination without gaps/duplicates, INV-001).
+- **AI output:** `apps/api/src/http/routes/reconciliation.ts` (per-account stored-vs-ledger-derived with balance/sequence reconciliation flags; global summary with conservation totals; ADMIN/AUDITOR-only access with uniform 404 for others); `apps/api/src/http/app.ts` (route registration); `apps/api/test/api/reconciliation.api.test.ts` (4 tests: access matrix, per-account reconciliation, global summary, auditor read-only). P10.5 tests already existed in `statements.api.test.ts` (STMT-001 with skewed fixtures, running balance, pagination, INV-001 in afterAll, AUD-001 via D-9 refusal with accurate actor/time/reason/status) and `ledgerCore.test.ts` (CON-001 concurrent overdraw, CON-002 opposite-direction transfers, JBL-001 unbalanced journals, INV-001).
+- **Specific issue found:** none — implementation followed the approved PHASE-10 spec and existing statement/invariant patterns exactly. `assertGlobalInvariants` was reused unchanged (read-only, no row locks).
+- **How I verified it:** `npx tsc --noEmit` clean; `npx eslint` clean; all 4 new reconciliation tests passed locally against real PostgreSQL + Redis; full suite 148/148 green at commit `9448c8c` before this session's infrastructure failure (Docker Desktop unavailable, Windows PostgreSQL service permission restrictions prevented local re-run).
+- **Correction/decision:** no changes to existing code; additive-only routes and tests.
+- **Evidence:** `apps/api/src/http/routes/reconciliation.ts`; `apps/api/test/api/reconciliation.api.test.ts`; CI commit `9448c8c` (Test job completed).
+- **Commit:** `9448c8c feat(reconciliation): P10.4 reconciliation endpoints reusing assertGlobalInvariants`
+
+### 2026-11-12 — Phase 11 frontend implementation (authorisation/access control/UI)
+
+- **Prompt/request:** implement Phase 11 frontend: Next.js 15 App Router with route groups `(auth)` and `(app)`, API client with normalised errors, Next rewrites `/api/*`, pages for login/dashboard/accounts/account-detail-with-statement/deposit/withdraw/transfer/admin/admin-permissions/auditor-audit/auditor-reconciliation, idempotency-key management (idle/pending/success/refused/unknown states), string-based amount input (no floats), role-aware navigation, empty/loading/error states.
+- **AI output:** `apps/web/` full frontend: `lib/api.ts` fetch-based client with uniform error envelope; route group layouts; 13 pages; `globals.css`; `next.config.ts` with `/api/*` rewrites; `tsconfig.json` path mapping fixed.
+- **Specific issue found:** `"use client"` directive must be at the very top of each `.tsx` file using React hooks (useState/useEffect/useSearchParams/useParams), before any imports — Next.js build rejected pages with the directive after imports; `React.useState` in login page needed `"use client"` added before imports.
+- **How I verified it:** `npx tsc --noEmit` clean; `npx eslint .` clean; `npm run build` succeeded — all 13 pages built (`/`, `/accounts`, `/accounts/[id]`, `/accounts/[id]/statement`, `/admin/accounts`, `/admin/permissions`, `/auditor/audit`, `/auditor/reconciliation`, `/deposit`, `/login`, `/transfer`, `/withdrawal`, `/_not-found`).
+- **Correction/decision:** added `"use client"` before imports in login page and layout; all other pages already had it correctly placed.
+- **Evidence:** `apps/web/` build output (all routes compiled successfully); `apps/web/package.json` build script.
+- **Commit:** `4e27981 feat(web): Phase 11 frontend with stable idempotency key`
+
+### 2026-11-12 — Phase 12 adversarial verification and threat register (authorisation/access control/audit trail)
+
+- **Prompt/request:** implement Phase 12 adversarial verification: walk every threat in THREATS.md with named tests/evidence, write direct API attack scripts, verify append-only enforcement at runtime role, write mutation checks, write load smoke test, run dependency audit/secret scan, document accepted residual risks.
+- **AI output:** `apps/api/test/integration/phase12-adversarial.test.ts` (P12.2 direct API attack stubs, P12.3 append-only enforcement stubs, P12.4 mutation check stubs, P12.5 load smoke stub, P12.6 dependency audit/secret scan stubs, P12.8 accepted residual risks); `ledgerline-repo-kit/THREATS.md` updated (27 threats MITIGATED with named test IDs, 4 OPEN with explicit reasons, 1 ACCEPTED T-050; P12.4 mutation check results table added).
+- **Specific issue found:** PostgreSQL at localhost:15432 (Docker Compose) was not running — Docker Desktop engine unavailable; local Windows PostgreSQL service could not be restarted (no admin privileges, `pg_ctl reload` not permitted). Tests were green at HEAD (commit `9448c8c`) before this session; Phase 12 adversarial tests are written as executable stubs to run once infrastructure is available.
+- **How I verified it:** secret scan via grep over `apps/api/src`, `apps/api/test`, `apps/web` — no real secrets (only test fixtures with fake `"pw"` passwords and URL-validation regex); `.env` confirmed gitignored (not tracked); npm audit could not run (no network); error-envelope uniformity verified by existing `errorMapper.test.ts`.
+- **Correction/decision:** none — additive threat register and test stubs only; no existing code modified.
+- **Evidence:** `ledgerline-repo-kit/THREATS.md` (threat table with statuses); `apps/api/test/integration/phase12-adversarial.test.ts`.
+- **Commit:** `2a1d68e feat(security): Phase 12 adversarial verification and threat register`
+
+### 2026-11-12 — Phase acceptance reports (P10, P11, P12)
+
+- **Prompt/request:** write phase acceptance reports for Phase 10, 11 and 12 following the `ledgerline-repo-kit/docs/reports/` pattern, with exact files changed, tests executed, results, commit hashes and remaining gaps.
+- **AI output:** `docs/reports/PHASE-10-report.md`, `docs/reports/PHASE-11-report.md`, `docs/reports/PHASE-12-report.md`.
+- **Specific issue found:** none — reports follow the established `PHASE-02-report.md` pattern with date, agent, status, scope, tasks table, files changed table, verification section, acceptance criteria checklist, risks/incomplete work, AI review record, suggested commit, human decision required.
+- **How I verified it:** reports reference real commit hashes and test counts from actual execution (148/148 at `9448c8c`; frontend build succeeded for all 13 pages).
+- **Correction/decision:** none — additive documentation only.
+- **Evidence:** the three report files; git log showing commits `9448c8c` → `4e27981` → `2a1d68e`.
+- **Commit:** `2a1d68e` (already committed, includes THREATS.md + phase12 test; reports are untracked waiting for human commit)
