@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { buildAuthenticate, type SessionDeps } from "../../auth/session.js";
 import { DomainError } from "../errors.js";
+import { isInt64Token } from "../../domain/money.js";
 import { assertGlobalInvariants, type InvariantReport } from "../../domain/invariants.js";
 
 /**
@@ -35,7 +36,7 @@ export function registerReconciliationRoutes(
         throw new DomainError("ACCOUNT_NOT_FOUND", "Account not found.");
       }
       const rawId = (request.params as { accountId: string }).accountId;
-      if (!/^\d{1,19}$/.test(rawId)) {
+      if (!isInt64Token(rawId)) {
         throw new DomainError("ACCOUNT_NOT_FOUND", "Account not found.");
       }
       const accountId = BigInt(rawId);
@@ -118,7 +119,12 @@ export function registerReconciliationRoutes(
         const seqSum = BigInt(agg.seq_sum ?? "0");
         const expectedSum = (eventLastSeq * (eventLastSeq + 1n)) / 2n;
 
-        const balanceReconciled = stored !== null && stored === derived;
+        // SYSTEM accounts carry no cached balance by design (P6.2) — there is
+        // no stored figure that could diverge; the ledger-derived position is
+        // the authority. Only CUSTOMER accounts have a stored-vs-derived
+        // reconciliation to perform.
+        const balanceReconciled =
+          header.kind === "SYSTEM" ? true : stored !== null && stored === derived;
         const sequenceReconciled = seqCount === eventLastSeq && seqSum === expectedSum;
 
         return await reply.code(200).send({
@@ -163,17 +169,30 @@ export function registerReconciliationRoutes(
         client.release();
       }
 
-      // Global conservation (AC4.3): Σ all customer balances + clearing
-      // balance = 0. Computed read-only from stored data; never mutates.
+      // Global conservation (AC4.3): Σ customer derived balances + clearing
+      // derived balance = 0. Both sides derive from LEDGER ENTRIES
+      // (Σcredits − Σdebits), never from cached balances — SYSTEM account
+      // cached balances are required to be NULL (P6.2), so a cached-balance
+      // sum would always read zero and falsely report non-conservation.
+      // Sign convention (credit-normal): deposit debits EXTERNAL_CLEARING and
+      // credits the customer; withdrawals credit EXTERNAL_CLEARING; transfers
+      // net to zero across customers. Every journal is balanced, so a correct
+      // ledger sums to exactly 0 across all accounts.
       const { rows: conservationRows } = await deps.pgPool.query<{
         customer_total: string | null;
         clearing: string | null;
       }>(
         `SELECT
-           (SELECT COALESCE(SUM(balance_minor), 0)::text FROM accounts
-             WHERE kind = 'CUSTOMER') AS customer_total,
-           (SELECT COALESCE(SUM(balance_minor), 0)::text FROM accounts
-             WHERE kind = 'SYSTEM') AS clearing`,
+           (SELECT COALESCE(SUM(CASE WHEN le.direction = 'CREDIT' THEN le.amount_minor
+                                     ELSE -le.amount_minor END), 0)::text
+              FROM ledger_entries le
+              JOIN accounts a ON a.id = le.account_id
+             WHERE a.kind = 'CUSTOMER') AS customer_total,
+           (SELECT COALESCE(SUM(CASE WHEN le.direction = 'CREDIT' THEN le.amount_minor
+                                     ELSE -le.amount_minor END), 0)::text
+              FROM ledger_entries le
+              JOIN accounts a ON a.id = le.account_id
+             WHERE a.kind = 'SYSTEM') AS clearing`,
       );
       const conservation = conservationRows[0]!;
       const customerTotal = BigInt(conservation.customer_total ?? "0");

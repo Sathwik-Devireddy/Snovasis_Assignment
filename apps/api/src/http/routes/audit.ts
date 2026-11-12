@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import { buildAuthenticate, type SessionDeps } from "../../auth/session.js";
 import { DomainError } from "../errors.js";
+import { isInt64Token } from "../../domain/money.js";
 
 /**
  * GET /audit/events — administrative audit query (PHASE-10 P10.3;
@@ -28,7 +29,7 @@ const AuditQuery = z
     cursor: z.string().optional(),
     event_type: z.string().optional(),
     subject_type: z.string().optional(),
-    actor_id: z.string().regex(/^\d{1,19}$/).optional(),
+    actor_id: z.string().regex(/^\d{1,19}$/).refine(isInt64Token).optional(),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
   })
@@ -53,7 +54,7 @@ function decodeCursor(raw: string | undefined): AuditCursor {
     typeof c === "object" &&
     c !== null &&
     (c.ts === null || typeof c.ts === "string") &&
-    (c.id === null || (typeof c.id === "string" && /^\d{1,19}$/.test(c.id)));
+    (c.id === null || (typeof c.id === "string" && isInt64Token(c.id)));
   if (!valid) throw new DomainError("VALIDATION_FAILED", "Validation failed.");
   if (c.ts !== null && Number.isNaN(Date.parse(c.ts))) throw new DomainError("VALIDATION_FAILED", "Validation failed.");
   return { ts: c.ts, id: c.id };

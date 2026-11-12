@@ -174,7 +174,6 @@ describe("reconciliation (real services; PHASE-10 P10.4)", () => {
     const stranger = await strangerCookie();
 
     const adminRes = await getPerAccount(admin, testAccountId);
-    console.error("ADMIN RES:", adminRes.statusCode, JSON.stringify(adminRes.body));
     expect(adminRes.statusCode).toBe(200);
 
     const auditorRes = await getPerAccount(auditor, testAccountId);

@@ -10,6 +10,7 @@ import {
 } from "../../domain/statement.js";
 import { buildAuthenticate, type SessionDeps } from "../../auth/session.js";
 import { DomainError } from "../errors.js";
+import { isInt64Token } from "../../domain/money.js";
 
 /**
  * GET /accounts/:accountId/statement — merged timeline (PHASE-10 P10.1;
@@ -76,8 +77,10 @@ export function registerStatementRoutes(
     const actor = request.actor;
     if (!actor) throw new DomainError("UNAUTHENTICATED", "UNAUTHENTICATED");
     const rawId = (request.params as { accountId: string }).accountId;
-    if (!/^\d{1,19}$/.test(rawId)) {
+    if (!isInt64Token(rawId)) {
       // Non-numeric ids get the SAME uniform envelope as nonexistent accounts.
+      // master-stabilisation 5.3: 19-digit tokens above INT64_MAX are rejected
+      // here too, before they can reach PostgreSQL as bigint params (22003).
       throw new DomainError("ACCOUNT_NOT_FOUND", "ACCOUNT_NOT_FOUND");
     }
     const accountId = BigInt(rawId);

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { Prisma } from "../../generated/prisma/index.js";
 import type { PrismaClient } from "../../infrastructure/prisma.js";
 import { DomainError } from "../errors.js";
 import { verifyPassword } from "../../infrastructure/argon2.js";
@@ -10,7 +11,6 @@ import {
   generateOpaqueToken,
   hashToken,
   hashUserAgent,
-  revokeSession,
   setSessionCookie,
   type SessionDeps,
 } from "../../auth/session.js";
@@ -68,35 +68,51 @@ export function registerAuthRoutes(
             await verifyPassword(DUMMY_HASH, password);
 
       if (!user || !verified) {
-        await deps.prisma.auditEvent.create({
-          data: {
-            actorId: user?.id ?? null,
-            eventType: "LOGIN_FAILED",
-            subjectType: "user",
-            subjectId: user?.id.toString() ?? normalizedEmail,
-            // Open internal vocabulary; the external envelope is uniform.
-            reasonCode: user ? "BAD_CREDENTIALS" : "NO_USER",
-            metadata: { internal_reason: !user ? "unknown_email" : user.status === "DISABLED" ? "account_disabled" : "bad_password" },
-          },
-        });
+        // Audit-only path (no state change): best-effort insert, exactly like
+        // the D-9 money-path refusals — an audit failure never degrades the
+        // uniform 401 envelope the caller must receive (AUTH-005).
+        try {
+          await deps.prisma.auditEvent.create({
+            data: {
+              actorId: user?.id ?? null,
+              eventType: "LOGIN_FAILED",
+              subjectType: "user",
+              subjectId: user?.id.toString() ?? normalizedEmail,
+              // Open internal vocabulary; the external envelope is uniform.
+              reasonCode: user ? "BAD_CREDENTIALS" : "NO_USER",
+              metadata: { internal_reason: !user ? "unknown_email" : user.status === "DISABLED" ? "account_disabled" : "bad_password" },
+            },
+          });
+        } catch (error) {
+          request.log.warn(
+            { err: error instanceof Error ? error.message : String(error) },
+            "LOGIN_FAILED audit row could not be persisted",
+          );
+        }
         throw new DomainError(UNIFORM_LOGIN_REFUSAL.code, UNIFORM_LOGIN_REFUSAL.message);
       }
 
       // Verified ACTIVE user → issue a session (opaque token, hashed at rest).
+      // Session row + LOGIN_SUCCEEDED audit event commit together or roll
+      // back together (master-stabilisation 4.2): no session without its
+      // audit record, no audit record for a session that never existed.
       const rawToken = generateOpaqueToken();
       const tokenHash = hashToken(rawToken);
       const expiresAt = new Date(Date.now() + deps.sessions.sessionTtlSeconds * 1000);
-      const session = await deps.prisma.session.create({
-        data: { userId: user.id, tokenHash, expiresAt, userAgentHash },
-        select: { id: true },
-      });
-      await deps.prisma.auditEvent.create({
-        data: {
-          actorId: user.id,
-          eventType: "LOGIN_SUCCEEDED",
-          subjectType: "session",
-          subjectId: session.id.toString(),
-        },
+      await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const created = await tx.session.create({
+          data: { userId: user.id, tokenHash, expiresAt, userAgentHash },
+          select: { id: true },
+        });
+        await tx.auditEvent.create({
+          data: {
+            actorId: user.id,
+            eventType: "LOGIN_SUCCEEDED",
+            subjectType: "session",
+            subjectId: created.id.toString(),
+          },
+        });
+        return created;
       });
       setSessionCookie(reply, deps.sessions, rawToken);
       return await reply.code(200).send({ user: { id: user.id.toString(), email: user.email, role: user.role } });
@@ -111,16 +127,25 @@ export function registerAuthRoutes(
     },
     async (request, reply) => {
       if (!request.actor) throw new DomainError("UNAUTHENTICATED", "Authentication required.");
-      await revokeSession(deps.sessions, request.actor);
-      await deps.prisma.auditEvent.create({
-        data: {
-          actorId: BigInt(request.actor.id),
-          eventType: "SESSION_REVOKED",
-          subjectType: "session",
-          subjectId: request.actor.sessionId,
-          metadata: { revoked_by: "self" },
-        },
-      });
+      // Revocation + SESSION_REVOKED audit commit together or roll back
+      // together (master-stabilisation 4.2): an audit failure must not leave
+      // a revoked session without its audit record (the caller then receives
+      // 500 and may retry — revocation is idempotent by effect).
+      await deps.prisma.$transaction([
+        deps.prisma.session.update({
+          where: { tokenHash: request.actor.tokenHash },
+          data: { revokedAt: new Date() },
+        }),
+        deps.prisma.auditEvent.create({
+          data: {
+            actorId: BigInt(request.actor.id),
+            eventType: "SESSION_REVOKED",
+            subjectType: "session",
+            subjectId: request.actor.sessionId,
+            metadata: { revoked_by: "self" },
+          },
+        }),
+      ]);
       clearSessionCookie(reply, deps.sessions);
       return await reply.code(200).send({ ok: true });
     },

@@ -11,7 +11,7 @@
  *   open a Prisma transaction.
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "../generated/prisma/index.js";
 import { config } from "../config.js";
 
 let client: PrismaClient | undefined;

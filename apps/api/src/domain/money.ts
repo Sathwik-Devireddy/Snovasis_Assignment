@@ -57,6 +57,22 @@ export function formatMinor(amount: Minor): string {
   return amount.toString();
 }
 
+/**
+ * Identifier-token boundary (master-stabilisation 5.3).
+ *
+ * Public account/actor ids are decimal BIGINT strings. A bare `\d{1,19}`
+ * regex accepts values above PostgreSQL's signed BIGINT maximum
+ * (9223372036854775807), which then fails in the database with SQLSTATE
+ * 22003 → an accidental 500. This helper enforces BOTH the digit grammar AND
+ * the signed 64-bit bound, so an out-of-range token is rejected at the
+ * transport boundary (400 VALIDATION_FAILED) before any database execution.
+ */
+export const INT64_MAX_STRING = "9223372036854775807";
+
+export function isInt64Token(value: string): boolean {
+  return /^\d{1,19}$/.test(value) && (value.length < 19 || value <= INT64_MAX_STRING);
+}
+
 /** Strictly positive (money amounts in journals must be > 0). */
 export function isPositive(amount: Minor): boolean {
   return amount > 0n;

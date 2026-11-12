@@ -110,10 +110,10 @@ export function buildAuthenticate(deps: SessionDeps) {
 /**
  * Revocation (logout/admin paths): exactly `UPDATE sessions SET revoked_at`
  * per ADR-006 item 2 — never a DELETE. Idempotent by effect (predicate).
+ *
+ * The logout route performs this update INSIDE its own transaction so the
+ * revocation and its SESSION_REVOKED audit event commit together
+ * (master-stabilisation 4.2). There is deliberately no standalone helper that
+ * revokes a session without its audit event.
  */
-export async function revokeSession(deps: SessionDeps, actor: Actor): Promise<void> {
-  await deps.prisma.session.update({
-    where: { tokenHash: actor.tokenHash },
-    data: { revokedAt: new Date() },
-  });
-}
+

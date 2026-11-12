@@ -106,6 +106,17 @@ async function rollbackQuietly(tx: PoolClient): Promise<void> {
  * bounds the per-actor volume of best-effort audit rows (FAILED + D-9
  * authorisation refusals) within a 60-second window. A capped write is skipped
  * with a log line — it never changes the caller's response.
+ *
+ * KNOWN LIMITATION (master-stabilisation 5.2 — documented best-effort, not a
+ * strict hard cap): the count and the insert run in SEPARATE short
+ * transactions, so concurrent requests can race between the COUNT and the
+ * INSERT and briefly exceed the cap. This is intentional: these attempt rows
+ * are best-effort audit signals only (D-9) — they never affect responses,
+ * money movement, or idempotency outcomes, so strict serialization (e.g. a
+ * per-actor advisory lock held across both statements) would add contention
+ * and deadlock risk on the hottest failure path for no correctness gain.
+ * The cap remains an effective volume bound against audit-row floods; Redis
+ * (RATE-002's first line) enforces the request-rate limit independently.
  */
 async function t042AllowsAttemptWrite(tx: PoolClient, actorId: bigint): Promise<boolean> {
   const cap = Number(process.env.T042_ATTEMPT_WRITE_CAP ?? 60);
@@ -237,12 +248,24 @@ async function commitBusinessRefusal(
  * key not consumed, retry-safe.
  */
 const DEADLOCK_RETRY_CODES = new Set(["40P01", "40001"]);
-// 55P03/40P02: lock/statement timeouts from the pool's T-035 settings;
-// 57014: statement_timeout abort ("canceling statement due to statement
-// timeout"). None of these are retried: 503 immediately, key not consumed,
-// retry-safe.
-const TIMEOUT_CODES = new Set(["55P03", "40P02", "57014"]);
+// 55P03/40P02: lock/statement timeouts from the pool's T-035 settings — never
+// retried: 503 immediately, key not consumed, retry-safe.
+// 57014 (query_canceled) is NOT listed here: it is broader than statement
+// timeout (master-stabilisation 5.1). It counts as a retry-safe timeout ONLY
+// when the driver message says the statement was canceled due to statement
+// timeout; genuine user/client cancellation is classified INFRA_FAILURE
+// (still rolled back, still key-not-consumed) instead of a false retryable
+// 503.
+const TIMEOUT_CODES = new Set(["55P03", "40P02"]);
 const MAX_TX_ATTEMPTS = 3;
+
+/** SQLSTATE 57014 means a retry-safe timeout only for statement_timeout. */
+export function isStatementTimeoutCancellation(error: unknown): boolean {
+  // Only real driver errors (pg raises Error subclasses carrying the message)
+  // are eligible; anything else cannot be trusted as a statement-timeout.
+  if (!(error instanceof Error)) return false;
+  return /canceling statement due to statement timeout/i.test(error.message);
+}
 
 /**
  * Test-only fault injection (P8.7 CON-003, sanctioned by the kit's fault
@@ -250,15 +273,30 @@ const MAX_TX_ATTEMPTS = 3;
  * execution attempt on a given connection fail with a synthetic 40P01 so
  * tests can prove the retry is transparent (same key, exactly one financial
  * effect, no FAILED attempt row). Never set in production.
+ *
+ * master-stabilisation 5.1 adds two 57014 hooks:
+ *   - statement_timeout_once: 57014 with the statement-timeout driver message
+ *     → must classify LOCK_TIMEOUT (retry-safe).
+ *   - cancel_once: 57014 with a user-request cancellation message → must
+ *     classify INFRA_FAILURE (NOT a false retry-safe 503).
  */
 const faultInjectedClients = new WeakSet<PoolClient>();
 
-function injectedDeadlockOnce(tx: PoolClient): Error | null {
-  if (process.env.BV_TEST_FAULT_INJECT !== "deadlock_once") return null;
+function injectedFaultOnce(tx: PoolClient): Error | null {
+  const kind = process.env.BV_TEST_FAULT_INJECT;
+  if (kind !== "deadlock_once" && kind !== "statement_timeout_once" && kind !== "cancel_once") {
+    return null;
+  }
   if (faultInjectedClients.has(tx)) return null;
   faultInjectedClients.add(tx);
-  const error = new Error("injected deadlock (BV_TEST_FAULT_INJECT)");
-  (error as { code?: string }).code = "40P01";
+  const error = new Error(
+    kind === "statement_timeout_once"
+      ? "canceling statement due to statement timeout (BV_TEST_FAULT_INJECT)"
+      : kind === "cancel_once"
+        ? "canceling statement due to user request (BV_TEST_FAULT_INJECT)"
+        : "injected deadlock (BV_TEST_FAULT_INJECT)",
+  );
+  (error as { code?: string }).code = kind === "deadlock_once" ? "40P01" : "57014";
   return error;
 }
 
@@ -283,7 +321,7 @@ export async function runMoneyCommand(
   command: MoneyCommand,
 ): Promise<MoneyResult> {
   for (let attempt = 1; ; attempt += 1) {
-    const fault = injectedDeadlockOnce(tx);
+    const fault = injectedFaultOnce(tx);
     try {
       if (fault !== null) throw fault;
       return await executeMoneyTransaction(tx, command);
@@ -312,8 +350,13 @@ async function handleMoneyCommandError(
     // fresh transaction. Nothing durable happened (the loser tx rolled back).
     return null;
   }
+  // master-stabilisation 5.1: 57014 is a retry-safe timeout ONLY for a
+  // statement_timeout cancellation; other query cancellations (user/client
+  // cancel) are INFRA_FAILURE — rolled back either way, key never consumed.
   const reason =
-    DEADLOCK_RETRY_CODES.has(pgCode) || TIMEOUT_CODES.has(pgCode)
+    DEADLOCK_RETRY_CODES.has(pgCode) ||
+    TIMEOUT_CODES.has(pgCode) ||
+    (pgCode === "57014" && isStatementTimeoutCancellation(error))
       ? "LOCK_TIMEOUT"
       : "INFRA_FAILURE";
   // Row 8/9 (final): everything rolled back, key NOT consumed, retry-safe.

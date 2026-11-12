@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { Prisma } from "../../generated/prisma/index.js";
 import type { Pool } from "pg";
 import type { PrismaClient } from "../../infrastructure/prisma.js";
 import type { Config } from "../../config.js";
@@ -7,6 +8,7 @@ import { DomainError } from "../errors.js";
 import { assertMutationHeaders } from "../guards.js";
 import { buildAuthenticate } from "../../auth/session.js";
 import { hashPassword } from "../../infrastructure/argon2.js";
+import { isInt64Token } from "../../domain/money.js";
 
 /**
  * PHASE-05 P5.7 — admin-only user and permission management (AUTHZ_MATRIX §B).
@@ -72,18 +74,24 @@ export function registerAdminRoutes(
       if (!passwordHash.startsWith("$argon2id$")) {
         throw new DomainError("INFRA_FAILURE", "Internal infrastructure failure.");
       }
-      const user = await prisma.user.create({
-        data: { email: email.toLowerCase(), passwordHash, role, status: "ACTIVE" },
-        select: { id: true, email: true, role: true },
-      });
-      await prisma.auditEvent.create({
-        data: {
-          actorId: BigInt(actor.id),
-          eventType: "USER_CREATED",
-          subjectType: "user",
-          subjectId: user.id.toString(),
-          metadata: { role },
-        },
+      // Atomicity (master-stabilisation 4.2): the user row and its
+      // USER_CREATED audit event commit together or roll back together — a
+      // failed audit insert must not leave an unaudited user behind.
+      const user = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const created = await tx.user.create({
+          data: { email: email.toLowerCase(), passwordHash, role, status: "ACTIVE" },
+          select: { id: true, email: true, role: true },
+        });
+        await tx.auditEvent.create({
+          data: {
+            actorId: BigInt(actor.id),
+            eventType: "USER_CREATED",
+            subjectType: "user",
+            subjectId: created.id.toString(),
+            metadata: { role },
+          },
+        });
+        return created;
       });
       return await reply.code(201).send({ user: { id: user.id.toString(), email: user.email, role: user.role } });
     },
@@ -102,6 +110,12 @@ export function registerAdminRoutes(
         throw new DomainError("ACCOUNT_NOT_FOUND", "Not found.");
       }
       const { userId } = request.params as { userId: string };
+      // master-stabilisation 5.3: malformed / over-range ids get the SAME
+      // uniform 404 as a nonexistent user (no enumeration, no accidental 500
+      // from a bigint cast inside PostgreSQL).
+      if (!isInt64Token(userId)) {
+        throw new DomainError("ACCOUNT_NOT_FOUND", "Not found.");
+      }
       const parsed = RoleChangeBody.safeParse(request.body);
       if (!parsed.success) {
         throw new DomainError("VALIDATION_FAILED", "Invalid request.");
@@ -176,6 +190,29 @@ export function registerAdminRoutes(
         throw new DomainError("VALIDATION_FAILED", "Invalid request.");
       }
       const { userId, accountId, permission } = parsed.data;
+      // master-stabilisation 5.3: malformed / over-range references get the
+      // SAME uniform 404 envelope as nonexistent targets (no enumeration, no
+      // accidental 500 from a bigint cast inside PostgreSQL).
+      if (!isInt64Token(userId) || !isInt64Token(accountId)) {
+        throw new DomainError("ACCOUNT_NOT_FOUND", "Not found.");
+      }
+      // AUTH-004 (policy first): an admin may never grant a permission to
+      // themself — checked before the target lookup so the policy answer is
+      // never masked by a target-existence answer.
+      if (actor.id === userId) {
+        throw new DomainError("SELF_GRANT_REFUSED", "An administrator may not grant a permission to themself.");
+      }
+      // The grant target must EXIST. Without this check a nonexistent user id
+      // reached the users FK and surfaced as a raw 500, and a nonexistent
+      // account id created a dangling grant row (account_permissions has no
+      // FK on account_id). Both now get the uniform 404 envelope.
+      const [targetUser, targetAccount] = await Promise.all([
+        prisma.user.findUnique({ where: { id: BigInt(userId) }, select: { id: true } }),
+        prisma.account.findUnique({ where: { id: BigInt(accountId) }, select: { id: true } }),
+      ]);
+      if (targetUser === null || targetAccount === null) {
+        throw new DomainError("ACCOUNT_NOT_FOUND", "Not found.");
+      }
 
       const client = await pgPool.connect();
       try {
@@ -189,11 +226,6 @@ export function registerAdminRoutes(
         if (existing.length > 0) {
           await client.query("ROLLBACK");
           throw new DomainError("VALIDATION_FAILED", "Permission already granted.");
-        }
-        // AUTH-004: an admin may never grant a permission to themself.
-        if (actor.id === userId) {
-          await client.query("ROLLBACK");
-          throw new DomainError("SELF_GRANT_REFUSED", "An administrator may not grant a permission to themself.");
         }
         await client.query(
           `INSERT INTO account_permissions (user_id, account_id, permission, granted_by)
@@ -238,21 +270,42 @@ export function registerAdminRoutes(
         throw new DomainError("VALIDATION_FAILED", "Invalid request.");
       }
       const { userId, accountId, permission } = parsed.data;
+      if (!isInt64Token(userId) || !isInt64Token(accountId)) {
+        throw new DomainError("ACCOUNT_NOT_FOUND", "Not found.");
+      }
       if (actor.id === userId) {
         throw new DomainError("SELF_GRANT_REFUSED", "An administrator may not revoke a permission from themself.");
       }
-      const { count } = await prisma.accountPermission.updateMany({
-        where: { userId: BigInt(userId), accountId: BigInt(accountId), permission, revokedAt: null },
-        data: { revokedAt: new Date() },
+      // The grant's target user must exist (uniform 404 otherwise). The
+      // ACCOUNT may legitimately have no active grant — revoking an unknown
+      // grant is an honest, audited no-op (revoked: false).
+      const targetUser = await prisma.user.findUnique({
+        where: { id: BigInt(userId) },
+        select: { id: true },
       });
-      await prisma.auditEvent.create({
-        data: {
-          actorId: BigInt(actor.id),
-          eventType: "permission_revoked",
-          subjectType: "account_permission",
-          subjectId: accountId,
-          metadata: { permission, userId, accountId, revoked: count > 0 },
-        },
+      if (targetUser === null) {
+        throw new DomainError("ACCOUNT_NOT_FOUND", "Not found.");
+      }
+      // Atomicity (master-stabilisation 4.2): the revocation and its
+      // permission_revoked audit event commit together or roll back together.
+      // The count is read from updateMany INSIDE the transaction so the audit
+      // metadata and response always describe exactly what this transaction
+      // committed.
+      const { count } = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const updated = await tx.accountPermission.updateMany({
+          where: { userId: BigInt(userId), accountId: BigInt(accountId), permission, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        await tx.auditEvent.create({
+          data: {
+            actorId: BigInt(actor.id),
+            eventType: "permission_revoked",
+            subjectType: "account_permission",
+            subjectId: accountId,
+            metadata: { permission, userId, accountId, revoked: updated.count > 0 },
+          },
+        });
+        return updated;
       });
       return await reply.code(200).send({ ok: true, userId, accountId, permission, revoked: count > 0 });
     },

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { Prisma } from "../../generated/prisma/index.js";
 import type { PrismaClient } from "../../infrastructure/prisma.js";
 import { DomainError } from "../errors.js";
 import { hashPassword, isArgon2idHash } from "../../infrastructure/argon2.js";
@@ -57,26 +58,35 @@ export function registerRegisterRoute(
       // The UNIQUE constraint is the real duplicate defence (compare-then-
       // insert would race); any unique violation maps into the same uniform
       // envelope below (REG-002).
+      //
+      // Atomicity: the user row and its USER_REGISTERED audit event commit
+      // together or roll back together (master-stabilisation 4.2) — a failed
+      // audit insert must not leave a user without its registration record.
       try {
-        const user = await deps.prisma.user.create({
-          data: {
-            email: normalizedEmail,
-            passwordHash,
-            role: "ACCOUNT_HOLDER", // server-fixed, never from the request body
-            status: "ACTIVE",
-          },
-          select: { id: true, email: true, role: true },
+        const created = await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+          const user = await tx.user.create({
+            data: {
+              email: normalizedEmail,
+              passwordHash,
+              role: "ACCOUNT_HOLDER", // server-fixed, never from the request body
+              status: "ACTIVE",
+            },
+            select: { id: true, email: true, role: true },
+          });
+          await tx.auditEvent.create({
+            data: {
+              actorId: user.id,
+              eventType: "USER_REGISTERED",
+              subjectType: "user",
+              subjectId: user.id.toString(),
+              metadata: { role: "ACCOUNT_HOLDER" },
+            },
+          });
+          return user;
         });
-        await deps.prisma.auditEvent.create({
-          data: {
-            actorId: user.id,
-            eventType: "USER_REGISTERED",
-            subjectType: "user",
-            subjectId: user.id.toString(),
-            metadata: { role: "ACCOUNT_HOLDER" },
-          },
-        });
-        return await reply.code(201).send({ user: { id: user.id.toString(), email: user.email, role: user.role } });
+        return await reply
+          .code(201)
+          .send({ user: { id: created.id.toString(), email: created.email, role: created.role } });
       } catch (error) {
         if (typeof error === "object" && error !== null && "code" in error && (error as { code: string }).code === "P2002") {
           throw new DomainError("VALIDATION_FAILED", "Registration failed.");

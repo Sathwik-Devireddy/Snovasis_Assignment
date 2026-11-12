@@ -32,15 +32,21 @@ import { DomainError } from "../errors.js";
 import { rateLimiter, type RateLimitDeps } from "../../infrastructure/rateLimiter.js";
 import { runMoneyCommand, type MoneyCommand } from "../../domain/transactionRunner.js";
 import { initiatorDisplayName } from "../../domain/statement.js";
-import { canonicalHash, parseMinor } from "../../domain/money.js";
+import { canonicalHash, isInt64Token, parseMinor } from "../../domain/money.js";
 
 const IdempotencyKeyHeader = z
   .string()
   .min(1, "missing Idempotency-Key")
   .max(64, "Idempotency-Key too long");
 
-/** Opaque public account ids are decimal BIGINT strings (opaque, sequenced). */
-const AccountRef = z.string().regex(/^\d{1,19}$/, "invalid account id");
+/** Opaque public account ids are decimal BIGINT strings (opaque, sequenced).
+ *  master-stabilisation 5.3: bounded to the signed 64-bit range — a 19-digit
+ *  token above INT64_MAX would otherwise reach PostgreSQL as a bigint
+ *  parameter and fail with 22003 → accidental 500. */
+const AccountRef = z
+  .string()
+  .regex(/^\d{1,19}$/, "invalid account id")
+  .refine((v) => isInt64Token(v), "invalid account id");
 
 const AmountToken = z.string().regex(/^-?\d{1,19}$/, "invalid amount_minor token");
 
@@ -246,7 +252,7 @@ export function registerMoneyRoutes(
       const actor = request.actor;
       if (!actor) throw new DomainError("UNAUTHENTICATED", "UNAUTHENTICATED");
       const rawId = (request.params as { transactionId: string }).transactionId;
-      if (!/^\d{1,19}$/.test(rawId)) {
+      if (!isInt64Token(rawId)) {
         throw new DomainError("ACCOUNT_NOT_FOUND", "ACCOUNT_NOT_FOUND");
       }
       const transactionId = BigInt(rawId);

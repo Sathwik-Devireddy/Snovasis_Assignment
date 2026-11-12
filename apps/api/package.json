@@ -5,8 +5,8 @@
   "type": "commonjs",
   "scripts": {
     "dev": "node --env-file=../../.env --watch --import tsx src/server.ts",
-    "start": "node --env-file=./.env dist/src/server.js",
-    "build": "tsc -p tsconfig.build.json",
+    "start": "node --env-file-if-exists=../../.env dist/server.js",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-prisma-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test scripts --no-error-on-unmatched-pattern",
     "test": "vitest run",

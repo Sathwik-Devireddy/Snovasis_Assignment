@@ -1,6 +1,5 @@
 /**
  * Account statement (PHASE-10 P10.1; REFUSAL_CODES §5, decision 9).
- *
  * One merged `timeline` from two pre-ordered category lists:
  *   - `category: "event"`  — ledger postings AND locked business refusals
  *     (rows carrying an `account_event_seq`); ordered STRICTLY by the shared
@@ -19,6 +18,8 @@
  * duplicates or skips rows even when one category is exhausted mid-page.
  * Money and sequence values cross the API as strings (BigInt-safe, T-049).
  */
+
+import { isInt64Token } from "./money.js";
 
 export type RawEventRow = {
   /** `account_event_seq` — shared counter value (string from pg). */
@@ -179,8 +180,8 @@ export function decodeCursor(raw: string | undefined): StatementCursor {
     (c.a === null ||
       (Array.isArray(c.a) && c.a.length === 2 && typeof c.a[0] === "string" && typeof c.a[1] === "string"));
   if (!valid) throw new Error("cursor malformed");
-  if (c.e !== null && !/^\d{1,19}$/.test(c.e)) throw new Error("cursor malformed");
-  if (c.a !== null && (Number.isNaN(Date.parse(c.a[0])) || !/^\d{1,19}$/.test(c.a[1]))) {
+  if (c.e !== null && !isInt64Token(c.e)) throw new Error("cursor malformed");
+  if (c.a !== null && (Number.isNaN(Date.parse(c.a[0])) || !isInt64Token(c.a[1]))) {
     throw new Error("cursor malformed");
   }
   return { e: c.e, a: c.a };

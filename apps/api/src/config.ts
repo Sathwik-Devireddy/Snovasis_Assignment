@@ -42,6 +42,16 @@ const envSchema = z
      */
     COOKIE_SECURE: z.enum(["true", "false"]).default("false"),
 
+    /**
+     * Allowed browser origins for mutating requests (CSRF origin policy —
+     * ADR-006 item 3). Comma-separated origins, e.g.
+     * `http://localhost:3000,https://app.example.com`. The frontend calls the
+     * API through the Next.js `/api/*` rewrite, which rewrites the upstream
+     * Host header — so the deployed topology NEEDS an explicit allow-list.
+     * Required in production (the server refuses to start without it).
+     */
+    APP_ORIGIN: z.string().optional(),
+
     /** Rate limits (fixed window per identity; Redis-backed, fail-soft — T-060). */
     RATE_LIMIT_REGISTER_LIMIT: z.coerce.number().int().positive().default(10),
     RATE_LIMIT_REGISTER_WINDOW_SECONDS: z.coerce.number().int().positive().default(3600),
@@ -66,6 +76,40 @@ const envSchema = z
         code: z.ZodIssueCode.custom,
         message: "COOKIE_SECURE must be 'true' in production (ADR-006; Secure cookies over HTTPS).",
       });
+    }
+    if (env.NODE_ENV === "production") {
+      // The frontend reaches the API through the Next.js `/api/*` rewrite,
+      // which rewrites the upstream Host header — a same-origin comparison is
+      // therefore impossible in production and an explicit allow-list is
+      // required. Fail fast instead of rejecting every browser mutation.
+      const origins = (env.APP_ORIGIN ?? "")
+        .split(",")
+        .map((o) => o.trim())
+        .filter((o) => o.length > 0);
+      if (origins.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["APP_ORIGIN"],
+          message:
+            "APP_ORIGIN is required in production: comma-separated allowed browser origins, e.g. https://app.example.com (ADR-006 CSRF origin policy).",
+        });
+      } else {
+        for (const origin of origins) {
+          let parsed: URL | undefined;
+          try {
+            parsed = new URL(origin);
+          } catch {
+            parsed = undefined;
+          }
+          if (parsed === undefined || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["APP_ORIGIN"],
+              message: `APP_ORIGIN entries must be http(s) origins, got: "${origin}".`,
+            });
+          }
+        }
+      }
     }
   });
 

@@ -23,7 +23,7 @@ import type { Config } from "../../config.js";
 import type { PrismaClient } from "../../infrastructure/prisma.js";
 import { assertMutationHeaders } from "../guards.js";
 import { DomainError } from "../errors.js";
-import { SYSTEM_CURRENCY } from "../../domain/money.js";
+import { SYSTEM_CURRENCY, isInt64Token } from "../../domain/money.js";
 
 const CreateAccountBody = z
   .object({
@@ -189,7 +189,7 @@ export function registerAccountRoutes(
     const actor = request.actor;
     if (!actor) throw new DomainError("UNAUTHENTICATED", "UNAUTHENTICATED");
     const raw = (request.params as { accountId: string }).accountId;
-    if (!/^\d{1,19}$/.test(raw)) {
+    if (!isInt64Token(raw)) {
       throw new DomainError("ACCOUNT_NOT_FOUND", "ACCOUNT_NOT_FOUND");
     }
     const accountId = BigInt(raw);

@@ -219,7 +219,7 @@ describe("admin user & permission management (real services; AUTHZ_MATRIX §B)",
       where: { eventType: "role_changed", subjectId: seed.holderId },
     });
     expect(events).toHaveLength(1);
-    expect((events[0].metadata as { role?: string }).role).toBe("AUDITOR");
+    expect((events[0]?.metadata as { role?: string } | undefined)?.role).toBe("AUDITOR");
   });
 
   it("last-admin guard: demoting the only active ADMIN is refused (ADMIN-001)", async () => {
@@ -252,8 +252,21 @@ describe("admin user & permission management (real services; AUTHZ_MATRIX §B)",
 
   it("grant + revoke are audit events; revocation of an unknown grant is a no-op", async () => {
     const cookie = await adminCookie();
-    // Account id unique per run so audit events from earlier runs don't match.
-    const accountId = String(9000000000001n + BigInt(randomBytes(2).readUInt16BE(0)));
+    // A REAL account: a grant must target an existing account (a dangling
+    // grant row is no longer creatable).
+    const created = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      headers: { "content-type": "application/json", cookie: cookie },
+      payload: {
+        accountNumber: `grant_${randomBytes(5).toString("hex")}`,
+        label: "grant target",
+        currencyCode: "INR",
+        kind: "CUSTOMER",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const accountId = created.json().account.id as string;
 
     const grant = await app.inject({
       method: "POST",
@@ -289,5 +302,49 @@ describe("admin user & permission management (real services; AUTHZ_MATRIX §B)",
     });
     expect(revoke2.statusCode).toBe(200);
     expect(revoke2.json().revoked).toBe(false);
+  });
+
+  it("a grant for a nonexistent user or account is a uniform 404 (never a 500, never a dangling grant)", async () => {
+    const cookie = await adminCookie();
+    const created = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      headers: { "content-type": "application/json", cookie: cookie },
+      payload: {
+        accountNumber: `grant404_${randomBytes(5).toString("hex")}`,
+        label: "grant 404 target",
+        currencyCode: "INR",
+        kind: "CUSTOMER",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const accountId = created.json().account.id as string;
+
+    // Nonexistent (but well-formed) user id → uniform 404. Before the fix
+    // this hit the users foreign key and surfaced as a raw 500.
+    const unknownUser = await app.inject({
+      method: "POST",
+      url: "/account-permissions",
+      headers: { "content-type": "application/json", cookie: cookie },
+      payload: { userId: "999999999", accountId, permission: "VIEW" },
+    });
+    expect(unknownUser.statusCode).toBe(404);
+    expect(unknownUser.json().error.code).toBe("ACCOUNT_NOT_FOUND");
+
+    // Nonexistent account id → uniform 404 (no dangling grant row).
+    const unknownAccount = await app.inject({
+      method: "POST",
+      url: "/account-permissions",
+      headers: { "content-type": "application/json", cookie: cookie },
+      payload: { userId: seed.holderId, accountId: "999999998", permission: "VIEW" },
+    });
+    expect(unknownAccount.statusCode).toBe(404);
+    expect(unknownAccount.json().error.code).toBe("ACCOUNT_NOT_FOUND");
+
+    // The refusals left no grant rows behind (no dangling grants).
+    const dangling = await prismaClient().accountPermission.findMany({
+      where: { OR: [{ userId: 999999999n }, { accountId: 999999998n }] },
+    });
+    expect(dangling).toHaveLength(0);
   });
 });
