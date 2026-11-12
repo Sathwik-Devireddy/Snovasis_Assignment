@@ -9,17 +9,10 @@
 "use client";
 
 import { apiPost } from "@/lib/api";
+import { MoneyParseError, parseAmountToPaise } from "@/lib/money";
 import { useEffect, useState } from "react";
 
 type WithdrawalResponse = { status: string; journalTransactionId: string; replayed: boolean };
-
-/**
- * Withdrawal page (PHASE-10 P11.3/P11.4/P11.5).
- *
- * POST /accounts/:accountId/withdrawals — holder with WITHDRAW grant or ADMIN.
- * Idempotency key generated once per form open, kept across retries.
- * Amount parsed as string → integer paise (no floats).
- */
 
 type State = "idle" | "pending" | "success" | "refused" | "unknown";
 
@@ -37,25 +30,29 @@ export default function WithdrawalPage() {
     setIdempotencyKey(`wd_${crypto.randomUUID()}`);
   }, []);
 
-  function parseAmountToPaise(rupees: string): string {
-    // P11.5: string parsing, no floats. Split on decimal point.
-    const parts = rupees.split(".");
-    const rupeesPart = parts[0] || "0";
-    const paisePart = (parts[1] ?? "").padEnd(2, "0").slice(0, 2);
-    return (BigInt(rupeesPart) * 100n + BigInt(paisePart)).toString();
+  /** P11.5: string parsing in lib/money.ts — no floats, exact BigInt paise. */
+  function amountMinor(): string {
+    return parseAmountToPaise(amount);
   }
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
     setResult(null);
+
+    let parsed: string;
+    try {
+      parsed = amountMinor();
+    } catch (err) {
+      setState("refused");
+      setError(err instanceof MoneyParseError ? err.message : "Invalid amount.");
+      return;
+    }
+
     setLoading(true);
-
-    const amountMinor = parseAmountToPaise(amount);
-
     try {
       const res = await apiPost(`/accounts/${accountId}/withdrawals`, {
-        amountMinor: amountMinor.toString(),
+        amountMinor: parsed,
         currencyCode: "INR",
       }, idempotencyKey);
 
@@ -86,7 +83,7 @@ export default function WithdrawalPage() {
     setLoading(true);
     // Retry with the SAME idempotency key (replay).
     void apiPost(`/accounts/${accountId}/withdrawals`, {
-      amountMinor: parseAmountToPaise(amount).toString(),
+      amountMinor: amountMinor(),
       currencyCode: "INR",
     }, idempotencyKey)
       .then((res) => {

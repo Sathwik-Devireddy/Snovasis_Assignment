@@ -1,11 +1,16 @@
+"use client";
+
 /**
- * Account detail page (PHASE-10 P11.3).
+ * Account detail page (PHASE-11 P11.3).
  *
- * GET /accounts/:id — shows account info. Money values as strings (T-049).
+ * GET /accounts/:id — shows account info. Money values as strings, exactly
+ * as received (T-049). Client-side fetch (session cookie is browser-scoped).
  */
 
 import { apiGet } from "@/lib/api";
-import { notFound } from "next/navigation";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { useEffect, useState } from "react";
 
 type Account = {
   id: string;
@@ -18,26 +23,48 @@ type Account = {
   event_last_seq: string | null;
 };
 
-export default async function AccountDetailPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = await params;
-  let account: Account | null = null;
-  let error = "";
+export default function AccountDetailPage() {
+  const params = useParams<{ id: string }>();
+  const id = params?.id;
 
-  try {
-    const data = (await apiGet(`/accounts/${id}`)) as { account: Account };
-    account = data.account ?? null;
-  } catch (err) {
-    if ((err as { statusCode?: number }).statusCode === 404) {
-      notFound();
-    }
-    error = "Failed to load account.";
+  const [account, setAccount] = useState<Account | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    apiGet(`/accounts/${id}`)
+      .then((data) => {
+        if (cancelled) return;
+        setAccount((data as { account?: Account }).account ?? null);
+      })
+      .catch((err: { statusCode?: number }) => {
+        if (cancelled) return;
+        setError(
+          err.statusCode === 404
+            ? "Account not found or not visible to you."
+            : "Failed to load account.",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  if (loading) return <div className="card"><p>Loading account…</p></div>;
+
+  if (!account) {
+    return (
+      <div className="card">
+        <div className="error">{error || "Account not found or not visible to you."}</div>
+        <p><Link href="/accounts">← Back to accounts</Link></p>
+      </div>
+    );
   }
-
-  if (!account) return <div className="error">{error}</div>;
 
   return (
     <div className="card">
@@ -54,7 +81,7 @@ export default async function AccountDetailPage({
         </tbody>
       </table>
       <p>
-        <a href={`/app/accounts/${account.id}/statement`}>View Statement →</a>
+        <Link href={`/accounts/${account.id}/statement`}>View Statement →</Link>
       </p>
     </div>
   );

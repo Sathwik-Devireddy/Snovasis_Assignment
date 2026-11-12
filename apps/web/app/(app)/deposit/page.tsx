@@ -8,16 +8,10 @@
 "use client";
 
 import { apiPost } from "@/lib/api";
+import { MoneyParseError, parseAmountToPaise } from "@/lib/money";
 import { useEffect, useState } from "react";
 
 type DepositResponse = { status: string; journalTransactionId: string; replayed: boolean };
-
-/**
- * Deposit page (PHASE-10 P11.3 — H-2: ADMIN only).
- *
- * POST /accounts/:accountId/deposits — ADMIN cash desk. Holders have no
- * deposit path; this form can only fail for them.
- */
 
 type State = "idle" | "pending" | "success" | "refused" | "unknown";
 
@@ -34,24 +28,29 @@ export default function DepositPage() {
     setIdempotencyKey(`dep_${crypto.randomUUID()}`);
   }, []);
 
-  function parseAmountToPaise(rupees: string): string {
-    const parts = rupees.split(".");
-    const rupeesPart = parts[0] || "0";
-    const paisePart = (parts[1] ?? "").padEnd(2, "0").slice(0, 2);
-    return (BigInt(rupeesPart) * 100n + BigInt(paisePart)).toString();
+  /** P11.5: string parsing in lib/money.ts — no floats, exact BigInt paise. */
+  function amountMinor(): string {
+    return parseAmountToPaise(amount);
   }
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
     setResult(null);
+
+    let parsed: string;
+    try {
+      parsed = amountMinor();
+    } catch (err) {
+      setState("refused");
+      setError(err instanceof MoneyParseError ? err.message : "Invalid amount.");
+      return;
+    }
+
     setLoading(true);
-
-    const amountMinor = parseAmountToPaise(amount);
-
     try {
       const res = await apiPost(`/accounts/${accountId}/deposits`, {
-        amountMinor,
+        amountMinor: parsed,
         currencyCode: "INR",
       }, idempotencyKey);
 
@@ -78,7 +77,7 @@ export default function DepositPage() {
     setState("pending");
     setLoading(true);
     void apiPost(`/accounts/${accountId}/deposits`, {
-      amountMinor: parseAmountToPaise(amount).toString(),
+      amountMinor: amountMinor(),
       currencyCode: "INR",
     }, idempotencyKey)
       .then((res) => {

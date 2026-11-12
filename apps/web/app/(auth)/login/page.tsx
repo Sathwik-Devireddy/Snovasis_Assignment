@@ -32,7 +32,7 @@ export default function LoginPage() {
         return;
       }
       // Successful login — redirect to dashboard.
-      window.location.href = "/app/accounts";
+      window.location.href = "/accounts";
     } catch {
       setError("Unable to reach the server.");
     } finally {

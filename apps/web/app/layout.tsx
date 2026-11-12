@@ -1,3 +1,5 @@
+import "@/app/globals.css";
+
 export const metadata = {
   title: "BalanceVault",
   description: "Double-entry ledger — money conserved, duplicates refused, everything auditable.",

@@ -165,3 +165,44 @@ button:disabled {
   background: #fef3c7;
   color: #92400e;
 }
+
+/* Keyboard focus visibility (P11.6) — explicit for every interactive control. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* Mobile widths (P11.6): tighter nav, horizontally scrollable tables. */
+@media (max-width: 640px) {
+  nav {
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+  }
+
+  nav a {
+    font-size: 0.85rem;
+    padding: 0.3rem 0.5rem;
+  }
+
+  main {
+    padding: 1rem;
+  }
+
+  .card {
+    padding: 1rem;
+  }
+
+  table {
+    display: block;
+    overflow-x: auto;
+  }
+
+  th,
+  td {
+    white-space: nowrap;
+  }
+}
