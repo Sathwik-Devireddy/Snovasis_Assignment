@@ -176,6 +176,20 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
+/* Screen-reader-only text (table captions, hints that duplicate a visible
+   label). Visually hidden, still announced. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Mobile widths (P11.6): tighter nav, horizontally scrollable tables. */
 @media (max-width: 640px) {
   nav {

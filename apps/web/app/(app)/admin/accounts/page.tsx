@@ -28,7 +28,16 @@ export default function AdminAccountsPage() {
       setEmail("");
       setPassword("");
     } catch (err) {
-      setError(`Failed: ${(err as { code?: string }).code ?? "UNKNOWN"}`);
+      const code = (err as { code?: string }).code ?? "UNKNOWN";
+      setError(
+        code === "VALIDATION_FAILED"
+          ? "That email is already taken, or the details were invalid."
+          : code === "UNAUTHENTICATED"
+            ? "Your session has expired — please sign in again."
+            : code === "ACCOUNT_NOT_FOUND"
+              ? "Only an administrator may create users."
+              : `The request failed (${code}).`,
+      );
     } finally {
       setLoading(false);
     }
@@ -37,8 +46,11 @@ export default function AdminAccountsPage() {
   return (
     <div className="card">
       <h2>Admin: Create User</h2>
-      {error && <div className="error">{error}</div>}
-      {success && <div className="success">{success}</div>}
+      {/* One live region announces the outcome of the form. */}
+      <div role="status" aria-live="polite" aria-atomic="true">
+        {error && <div className="error">{error}</div>}
+        {success && <div className="success">{success}</div>}
+      </div>
       <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxWidth: 400 }}>
         <label>
           Email <input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} />

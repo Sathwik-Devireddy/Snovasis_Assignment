@@ -72,6 +72,11 @@ export async function apiPost(
   return apiRequest(path, { method: "POST", body, idempotencyKey });
 }
 
+/** DELETE — administrative revocations (body-carrying DELETE). */
+export async function apiDelete(path: string, body: unknown): Promise<unknown> {
+  return apiRequest(path, { method: "DELETE", body });
+}
+
 export { ApiErrorResponse };
 
 /**
