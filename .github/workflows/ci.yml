@@ -85,10 +85,10 @@ jobs:
       - name: Install
         run: npm install
       - name: Lint
-        run: npm run lint -w apps/web
+        run: npm run lint --workspace apps/web
       - name: Typecheck
-        run: npm run typecheck -w apps/web
+        run: npm run typecheck --workspace apps/web
       - name: Unit tests
-        run: npm run test -w apps/web
+        run: npm run test --workspace apps/web
       - name: Production build
-        run: npm run build -w apps/web
+        run: npm run build --workspace apps/web

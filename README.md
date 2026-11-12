@@ -33,10 +33,10 @@ Full reference: [`ledgerline-repo-kit/docs/DEPLOYMENT.md`](ledgerline-repo-kit/d
 
 ```powershell
 npm test                          # API: 25 files / 191 tests against real PostgreSQL 17 + Redis
-npm run test -w apps/web          # web: 4 files / 41 tests
+npm run test --workspace apps/web # web: 4 files / 41 tests
 npm run lint                      # both workspaces
 npm run typecheck                 # both workspaces
-npm run build -w apps/web         # production build (needs API_INTERNAL_URL)
+npm run build --workspace apps/web  # production build (needs API_INTERNAL_URL)
 ```
 
 ## Invariants (normative docs in `ledgerline-repo-kit/`)

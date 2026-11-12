@@ -14,8 +14,11 @@ import { authorizeInTransaction, readGrantsForShare } from "../../src/domain/acc
  * ADR-007/T-041 groundwork for the Phase 6/7 revocationRace tests).
  */
 
-const accountA = 424_242_001; // arbitrary account ids — accounts table arrives Phase 6 (FK stub)
-const accountB = 424_242_002;
+// REAL account rows are seeded below: `account_permissions.account_id` now
+// carries a real foreign key to `accounts` (migration 0006), so a grant can
+// no longer point at a nonexistent account.
+let accountA!: string;
+let accountB!: string;
 
 let conn!: PoolClient;
 let holderId!: string;
@@ -35,6 +38,18 @@ async function seed(): Promise<void> {
   );
   holderId = String(rows[0].id);
   otherHolderId = String(rows.find((r) => r.email.startsWith("grantauth_other_"))!.id);
+
+  // Real CUSTOMER accounts (the grants below reference them). A CUSTOMER row
+  // must carry a cached balance and its event sequence (accounts_customer_shape).
+  const accountRows = await conn.query(
+    `INSERT INTO accounts (account_number, label, currency_code, kind, balance_minor, event_last_seq, status) VALUES
+       ($1, 'grants auth A', 'INR', 'CUSTOMER', 0, 0, 'ACTIVE'),
+       ($2, 'grants auth B', 'INR', 'CUSTOMER', 0, 0, 'ACTIVE')
+     RETURNING id::text AS id`,
+    [`grantauth_a_${suffix}`, `grantauth_b_${suffix}`],
+  );
+  accountA = accountRows.rows[0].id;
+  accountB = accountRows.rows[1].id;
 }
 
 describe("authorizeInTransaction (real PostgreSQL; P5.7b)", () => {
