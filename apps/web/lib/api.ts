@@ -72,4 +72,102 @@ export async function apiPost(
   return apiRequest(path, { method: "POST", body, idempotencyKey });
 }
 
-export type { ApiErrorResponse };
+export { ApiErrorResponse };
+
+/**
+ * Money error classification (master-stabilisation 4.3).
+ *
+ * The backend maps LOCK_TIMEOUT → 503, and the transport can also produce
+ * HTTP 408, rate-limit 429, or a network failure — all cases where the
+ * financial outcome is NOT known. The money pages must never present an
+ * unknown outcome as a confirmed refusal, and a retry of the same intent
+ * must always reuse the original idempotency key.
+ */
+export type MoneyErrorClass =
+  | "refused" // confirmed business/authorization refusal (403/404/409)
+  | "session_expired" // 401 — sign in again; nothing was processed
+  | "invalid" // 400 — permanent validation failure; nothing was processed
+  | "retry_later" // 429 — rate limited; nothing was processed
+  | "unknown"; // 408 / 503 LOCK_TIMEOUT / network / other 5xx — outcome NOT known
+
+export type ClassifiedMoneyError = {
+  kind: MoneyErrorClass;
+  /** Outcome not known or not yet processed — retrying with the SAME key is safe. */
+  retrySameKey: boolean;
+  /** User-facing message. Never claims a definite failure when the outcome is unknown. */
+  message: string;
+  code: string;
+};
+
+export function classifyMoneyError(err: unknown): ClassifiedMoneyError {
+  if (err instanceof ApiErrorResponse) {
+    const { statusCode, code, message } = err;
+    if (statusCode === 503 && code === "LOCK_TIMEOUT") {
+      return {
+        kind: "unknown",
+        retrySameKey: true,
+        code,
+        message:
+          "Lock timeout: your request may or may not have been processed. Retry with the same idempotency key to check.",
+      };
+    }
+    if (statusCode === 408) {
+      return {
+        kind: "unknown",
+        retrySameKey: true,
+        code,
+        message:
+          "Request timed out: the outcome is not known. Retry with the same idempotency key to check.",
+      };
+    }
+    if (statusCode === 401) {
+      return {
+        kind: "session_expired",
+        retrySameKey: false,
+        code,
+        message: "Your session has expired. Please sign in again.",
+      };
+    }
+    if (statusCode === 400) {
+      return {
+        kind: "invalid",
+        retrySameKey: false,
+        code,
+        message: `Invalid request: ${message}`,
+      };
+    }
+    if (statusCode === 429) {
+      return {
+        kind: "retry_later",
+        retrySameKey: true,
+        code,
+        message:
+          "Too many requests: nothing was processed. Wait a moment, then retry with the same idempotency key.",
+      };
+    }
+    if (statusCode >= 500) {
+      return {
+        kind: "unknown",
+        retrySameKey: true,
+        code,
+        message:
+          "Server error: the outcome is not known. Retry with the same idempotency key to check.",
+      };
+    }
+    return {
+      kind: "refused",
+      retrySameKey: false,
+      code,
+      message: `Refused: ${code}`,
+    };
+  }
+  // Not an envelope (e.g. fetch TypeError on network failure): the request
+  // may never have reached the API — the outcome is unknown.
+  return {
+    kind: "unknown",
+    retrySameKey: true,
+    code: "NETWORK_ERROR",
+    message:
+      "Network error: the outcome is not known. Retry with the same idempotency key to check.",
+  };
+}

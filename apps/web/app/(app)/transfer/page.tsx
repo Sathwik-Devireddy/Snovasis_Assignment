@@ -2,105 +2,41 @@
  * Transfer page (PHASE-10 P11.3).
  *
  * POST /transfers — internal transfer. Requires TRANSFER grant on source.
- * Idempotency key management per P11.4.
+ * Idempotency key management per P11.4: the key is bound to the exact payload
+ * (a retry re-sends the ORIGINAL body with the ORIGINAL key; a changed amount
+ * starts a NEW intent with a NEW key).
  */
 
 "use client";
 
-import { apiPost } from "@/lib/api";
+import { MoneyOutcomePanel } from "@/app/(app)/money-outcome-panel";
 import { MoneyParseError, parseAmountToPaise } from "@/lib/money";
-import { useEffect, useState } from "react";
-
-type TransferResponse = { status: string; journalTransactionId: string; replayed: boolean };
-
-type State = "idle" | "pending" | "success" | "refused" | "unknown";
+import { useMoneyOperation } from "@/lib/use-money-operation";
+import { useState } from "react";
 
 export default function TransferPage() {
   const [sourceAccountId, setSourceAccountId] = useState("");
   const [destinationAccountId, setDestinationAccountId] = useState("");
   const [amount, setAmount] = useState("");
-  const [idempotencyKey, setIdempotencyKey] = useState("");
-  const [state, setState] = useState<State>("idle");
-  const [error, setError] = useState("");
-  const [result, setResult] = useState<TransferResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    setIdempotencyKey(`tr_${crypto.randomUUID()}`);
-  }, []);
-
-  /** P11.5: string parsing in lib/money.ts — no floats, exact BigInt paise. */
-  function amountMinor(): string {
-    return parseAmountToPaise(amount);
-  }
+  const [validationError, setValidationError] = useState("");
+  const op = useMoneyOperation("tr");
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    setError("");
-    setResult(null);
-
+    setValidationError("");
     let parsed: string;
     try {
-      parsed = amountMinor();
+      parsed = parseAmountToPaise(amount);
     } catch (err) {
-      setState("refused");
-      setError(err instanceof MoneyParseError ? err.message : "Invalid amount.");
+      setValidationError(err instanceof MoneyParseError ? err.message : "Invalid amount.");
       return;
     }
-
-    setLoading(true);
-    try {
-      const res = await apiPost("/transfers", {
-        sourceAccountId,
-        destinationAccountId,
-        amountMinor: parsed,
-        currencyCode: "INR",
-      }, idempotencyKey);
-
-      const data = res as TransferResponse;
-      setResult(data);
-      setState(data.status === "SUCCEEDED" ? "success" : "refused");
-    } catch (err) {
-      if ((err as { statusCode?: number }).statusCode === 408) {
-        setState("unknown");
-        setError("Request timed out. Retry with the same idempotency key.");
-      } else {
-        setState("refused");
-        setError(`Refused: ${(err as { code?: string }).code ?? "REFUSED"}`);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function retry() {
-    setError("");
-    setResult(null);
-    setState("pending");
-    setLoading(true);
-    void apiPost("/transfers", {
+    await op.submit("/transfers", {
       sourceAccountId,
       destinationAccountId,
-      amountMinor: amountMinor(),
+      amountMinor: parsed,
       currencyCode: "INR",
-    }, idempotencyKey)
-      .then((res) => {
-        const data = res as TransferResponse;
-        setResult(data);
-        setState(data.status === "SUCCEEDED" ? "success" : "refused");
-      })
-      .catch((err) => {
-        setState("refused");
-        setError(`Refused: ${(err as { code?: string }).code ?? "REFUSED"}`);
-      })
-      .finally(() => setLoading(false));
-  }
-
-  function newIntent() {
-    setIdempotencyKey(`tr_${crypto.randomUUID()}`);
-    setState("idle");
-    setError("");
-    setResult(null);
+    });
   }
 
   return (
@@ -118,32 +54,26 @@ export default function TransferPage() {
           <input required type="text" placeholder="e.g. 50.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
           <span style={{ fontSize: "0.75rem", color: "#666" }}>String input → integer paise server-side.</span>
         </label>
-        <button type="submit" disabled={loading || state === "pending"}>
-          {loading ? "Sending…" : "Transfer"}
+        <button type="submit" disabled={op.pending}>
+          {op.pending ? "Sending…" : "Transfer"}
         </button>
       </form>
 
-      <p className="mono">Idempotency key: {idempotencyKey}</p>
-
-      {state === "success" && (
-        <div className="success">
-          Transfer succeeded. Journal:{" "}
-          <span className="mono">{result?.journalTransactionId}</span>{result?.replayed ? " (replayed)" : ""}
-        </div>
-      )}
-      {state === "refused" && <div className="error">{error}</div>}
-      {state === "unknown" && (
-        <div className="error badge-unknown">
-          Request timed out. Retry with the same key to check.
+      {validationError !== "" && (
+        <div className="error" role="alert">
+          {validationError}
         </div>
       )}
 
-      {(state === "success" || state === "refused" || state === "unknown") && (
-        <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
-          <button onClick={newIntent} disabled={loading}>New Intent</button>
-          {state === "unknown" && <button onClick={retry} disabled={loading}>Retry (same key)</button>}
-        </div>
-      )}
+      <p className="mono">Idempotency key: {op.key}</p>
+
+      <MoneyOutcomePanel
+        state={op.state}
+        message={op.outcome?.message ?? ""}
+        pending={op.pending}
+        onRetry={() => void op.retry()}
+        onNewIntent={op.newIntent}
+      />
     </div>
   );
 }

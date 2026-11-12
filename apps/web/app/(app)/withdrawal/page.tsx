@@ -2,107 +2,39 @@
  * Withdrawal page (PHASE-10 P11.3/P11.4/P11.5).
  *
  * POST /accounts/:accountId/withdrawals — holder with WITHDRAW grant or ADMIN.
- * Idempotency key generated once per form open, kept across retries.
- * Amount parsed as string → integer paise (no floats).
+ * Amount parsed as string → integer paise (no floats). The idempotency key is
+ * bound to the exact payload: a retry re-sends the ORIGINAL body with the
+ * ORIGINAL key, and a changed amount starts a NEW intent with a NEW key.
  */
 
 "use client";
 
-import { apiPost } from "@/lib/api";
+import { MoneyOutcomePanel } from "@/app/(app)/money-outcome-panel";
 import { MoneyParseError, parseAmountToPaise } from "@/lib/money";
-import { useEffect, useState } from "react";
-
-type WithdrawalResponse = { status: string; journalTransactionId: string; replayed: boolean };
-
-type State = "idle" | "pending" | "success" | "refused" | "unknown";
+import { useMoneyOperation } from "@/lib/use-money-operation";
+import { useState } from "react";
 
 export default function WithdrawalPage() {
   const [accountId, setAccountId] = useState("");
   const [amount, setAmount] = useState(""); // rupees string, e.g. "10.50"
-  const [idempotencyKey, setIdempotencyKey] = useState("");
-  const [state, setState] = useState<State>("idle");
-  const [error, setError] = useState("");
-  const [result, setResult] = useState<WithdrawalResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  // Generate a new idempotency key when the form mounts (new intent).
-  useEffect(() => {
-    setIdempotencyKey(`wd_${crypto.randomUUID()}`);
-  }, []);
-
-  /** P11.5: string parsing in lib/money.ts — no floats, exact BigInt paise. */
-  function amountMinor(): string {
-    return parseAmountToPaise(amount);
-  }
+  const [validationError, setValidationError] = useState("");
+  const op = useMoneyOperation("wd");
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    setError("");
-    setResult(null);
-
+    setValidationError("");
+    // Parsed BEFORE any state transition (no floats, exact BigInt paise).
     let parsed: string;
     try {
-      parsed = amountMinor();
+      parsed = parseAmountToPaise(amount);
     } catch (err) {
-      setState("refused");
-      setError(err instanceof MoneyParseError ? err.message : "Invalid amount.");
+      setValidationError(err instanceof MoneyParseError ? err.message : "Invalid amount.");
       return;
     }
-
-    setLoading(true);
-    try {
-      const res = await apiPost(`/accounts/${accountId}/withdrawals`, {
-        amountMinor: parsed,
-        currencyCode: "INR",
-      }, idempotencyKey);
-
-      const data = res as WithdrawalResponse;
-      setResult(data);
-      if (data.status === "SUCCEEDED") {
-        setState("success");
-      }
-    } catch (err) {
-      if (err instanceof Error && (err as { statusCode?: number }).statusCode === 408) {
-        // Timeout — unknown state, offer retry with same key
-        setState("unknown");
-        setError("Request timed out. Retry with the same idempotency key.");
-      } else {
-        setState("refused");
-        const code = (err as { code?: string }).code ?? "REFUSED";
-        setError(`Refused: ${code}`);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function retry() {
-    setError("");
-    setResult(null);
-    setState("pending");
-    setLoading(true);
-    // Retry with the SAME idempotency key (replay).
-    void apiPost(`/accounts/${accountId}/withdrawals`, {
-      amountMinor: amountMinor(),
+    await op.submit(`/accounts/${accountId}/withdrawals`, {
+      amountMinor: parsed,
       currencyCode: "INR",
-    }, idempotencyKey)
-      .then((res) => {
-        const data = res as WithdrawalResponse;
-        setResult(data);
-        setState(data.status === "SUCCEEDED" ? "success" : "refused");
-      })
-      .catch((err) => {
-        setState("refused");
-        setError(`Refused: ${(err as { code?: string }).code ?? "REFUSED"}`);
-      })
-      .finally(() => setLoading(false));
-  }
-
-  function newIntent() {
-    setIdempotencyKey(`wd_${crypto.randomUUID()}`);
-    setState("idle");
-    setError("");
-    setResult(null);
+    });
   }
 
   return (
@@ -126,41 +58,26 @@ export default function WithdrawalPage() {
             Entered as string → converted to integer paise server-side.
           </span>
         </label>
-        <button type="submit" disabled={loading || state === "pending"}>
-          {loading ? "Sending…" : "Withdraw"}
+        <button type="submit" disabled={op.pending}>
+          {op.pending ? "Sending…" : "Withdraw"}
         </button>
       </form>
 
-      <p className="mono">Idempotency key: {idempotencyKey}</p>
-
-      {state === "success" && (
-        <div className="success">
-          Withdrawal succeeded. Journal:{" "}
-          <span className="mono">{result?.journalTransactionId}</span>{result?.replayed ? " (replayed)" : ""}
-        </div>
-      )}
-      {state === "refused" && (
-        <div className="error">{error}</div>
-      )}
-      {state === "unknown" && (
-        <div className="error badge-unknown">
-          Request timed out. The result is unknown — retry with the same key
-          to check, or start a new intent.
+      {validationError !== "" && (
+        <div className="error" role="alert">
+          {validationError}
         </div>
       )}
 
-      {(state === "success" || state === "refused" || state === "unknown") && (
-        <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
-          <button onClick={newIntent} disabled={loading}>
-            New Intent
-          </button>
-          {state === "unknown" && (
-            <button onClick={retry} disabled={loading}>
-              Retry (same key)
-            </button>
-          )}
-        </div>
-      )}
+      <p className="mono">Idempotency key: {op.key}</p>
+
+      <MoneyOutcomePanel
+        state={op.state}
+        message={op.outcome?.message ?? ""}
+        pending={op.pending}
+        onRetry={() => void op.retry()}
+        onNewIntent={op.newIntent}
+      />
     </div>
   );
 }
