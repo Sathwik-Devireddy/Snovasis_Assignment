@@ -57,7 +57,8 @@ export default function LoginPage() {
         </button>
       </form>
       <p style={{ fontSize: "0.9rem", color: "#666" }}>
-        Demo credentials are pre-provisioned. Contact the administrator for an account.
+        New here? <a href="/register">Create an account</a> — or contact the
+        administrator for access to existing accounts.
       </p>
     </main>
   );

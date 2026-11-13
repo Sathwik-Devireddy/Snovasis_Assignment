@@ -21,7 +21,7 @@
 
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiPost, classifyMoneyError } from "./api";
 import {
   classifyMoneyResponse,
@@ -62,7 +62,13 @@ export type MoneyOperation = {
 };
 
 export function useMoneyOperation(keyPrefix: string): MoneyOperation {
-  const keyRef = useRef<string>(newIdempotencyKey(keyPrefix));
+  // SSR-safety (React #418): a key minted DURING render puts a random value
+  // into the server-rendered HTML that hydration then replaces with a fresh
+  // random value — a guaranteed hydration mismatch. The key therefore starts
+  // EMPTY (identical on server and client) and is minted once after mount.
+  // Submission never depends on it: the first submit mints its own key via
+  // decideIntentKey below.
+  const keyRef = useRef<string>("");
   const intentRef = useRef<MoneyIntent | null>(null);
   const outcomeRef = useRef<MoneyOutcome | null>(null);
   const pendingRef = useRef(false);
@@ -71,7 +77,15 @@ export function useMoneyOperation(keyPrefix: string): MoneyOperation {
   const [pending, setPending] = useState(false);
   const [outcome, setOutcome] = useState<MoneyOutcome | null>(null);
   const [intent, setIntent] = useState<MoneyIntent | null>(null);
-  const [key, setKey] = useState<string>(keyRef.current);
+  const [key, setKey] = useState<string>("");
+
+  useEffect(() => {
+    if (keyRef.current === "") {
+      const first = newIdempotencyKey(keyPrefix);
+      keyRef.current = first;
+      setKey(first);
+    }
+  }, [keyPrefix]);
 
   const applyOutcome = useCallback((next: MoneyOutcome) => {
     outcomeRef.current = next;

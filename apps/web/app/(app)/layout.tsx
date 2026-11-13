@@ -10,6 +10,7 @@
  */
 
 import Link from "next/link";
+import SessionGuard from "./session-guard";
 import SignOutButton from "./sign-out-button";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -27,7 +28,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <Link href="/auditor/reconciliation">Reconciliation</Link>
         <SignOutButton />
       </nav>
-      <main>{children}</main>
+      <main>
+        <SessionGuard />
+        {children}
+      </main>
     </>
   );
 }
