@@ -101,6 +101,43 @@ Minimum for a production deployment:
 | `DATABASE_URL` | `postgresql://ledgerline_app:…@db:5432/balancevault` |
 | `REDIS_URL` | `redis://redis:6379` (TLS + ACLs recommended) |
 
+### 5a. Managed Postgres (Neon) — verified 2026-11-12
+
+The production deployment uses **Neon** (`ep-spring-king-a1uosmju-pooler.ap-southeast-1.aws.neon.tech/neondb`)
+for PostgreSQL and **Upstash** for Redis. Two things differ from a
+superuser-equipped local Docker database:
+
+1. **Migration 0001 needs an explicit SET-capable membership.** On a managed
+   database the bootstrap user (`neondb_owner`) is CREATEROLE but NOT a
+   superuser, and PostgreSQL 16+ no longer lets a role-creator `SET ROLE` to
+   the roles it created without an explicit grant. `ALTER DATABASE … OWNER TO`
+   then fails with `must be able to SET ROLE "ledgerline_owner"` and the whole
+   bootstrap transaction rolls back (the roles disappear again). Migration
+   0001 now grants the executing role `GRANT ledgerline_owner TO CURRENT_USER
+   WITH INHERIT TRUE, SET TRUE` before the owner-transfer statements —
+   redundant but harmless on a true superuser.
+2. **The documented order is still the whole procedure** — run both against
+   the SAME environment file that the deployment uses, because the role
+   passwords the bootstrap writes must be exactly the ones the connection
+   URLs carry:
+
+   ```powershell
+   node --env-file=.env apps/api/scripts/migrate.mjs --bootstrap   # roles (runs 0001 as neondb_owner)
+   node --env-file=.env apps/api/scripts/migrate.mjs               # schema (runs 0002–0006 as ledgerline_owner)
+   ```
+
+   Executed 2026-11-12: both exited 0 against Neon; 11 tables, all owned by
+   `ledgerline_owner`; `/ready` returned `200 {"ok":true,"checks":{"postgres":"ok","redis":"ok"}}`
+   through the production environment.
+
+3. **The web tier must target a PUBLIC API origin.** Vercel cannot resolve a
+   Render *private* hostname (`API_INTERNAL_URL=http://api:4000` or a Render
+   internal address → `502 DNS_HOSTNAME_NOT_FOUND` on every `/api/*` call).
+   On Vercel set `API_INTERNAL_URL=https://<render-service>.onrender.com`
+   (the public HTTPS origin); the API tier's `APP_ORIGIN` must then contain
+   the frontend origin, and the CSRF origin guard requires it on browser
+   mutations through the proxy.
+
 Build and start the web tier:
 
 ```bash

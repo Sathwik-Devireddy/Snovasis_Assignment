@@ -88,11 +88,14 @@ demo-only** and must be rotated for any real deployment.
 
 ## Live URL
 
-Not deployed yet — the submission host must set `API_INTERNAL_URL` (web tier)
-and `APP_ORIGIN` (API tier) and run `prisma generate` for its platform. See
+- **Frontend:** https://snovasis-assignment-seven.vercel.app
+- **Backend:** https://snovasis-assignment.onrender.com (`/health` and `/ready` return 200)
+
+The API tier runs on Render (PostgreSQL on Neon, Redis on Upstash). The
+browser talks only to the same-origin `/api/*` proxy on the frontend; the
+backend validates the browser origin against `APP_ORIGIN`. See
 [`ledgerline-repo-kit/docs/DEPLOYMENT.md`](ledgerline-repo-kit/docs/DEPLOYMENT.md)
-for the exact deployment and verification steps. *(Fill in the public URL when
-the deployment exists.)*
+for the topology, the exact environment variables and the verification steps.
 
 ## Commands
 

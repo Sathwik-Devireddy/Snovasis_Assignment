@@ -60,6 +60,18 @@ async function up(pgm) {
     $$;
   `);
 
+  // Managed-Postgres accommodation (Neon/Supabase/RDS — no superuser):
+  // PostgreSQL 16+ no longer lets a CREATEROLE user SET ROLE to the roles it
+  // creates without an explicit SET-capable membership, and the statements
+  // below (ALTER DATABASE/TABLE ... OWNER TO) require exactly that. On a true
+  // superuser (local Docker bootstrap, CI) the grant is redundant and
+  // harmless; on a managed database it is what makes bootstrap possible.
+  // The executing role has ADMIN on the roles it just created, so it may
+  // grant this membership to itself.
+  pgm.sql(`
+    GRANT ${roleNameOwner} TO CURRENT_USER WITH INHERIT TRUE, SET TRUE;
+  `);
+
   // The owner owns the database (=> schema `public` through pg_database_owner),
   // so later migrations (run as ledgerline_owner) can create/alter objects.
   pgm.sql(

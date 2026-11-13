@@ -26,6 +26,7 @@ type SeedSchema = {
   holderId: string;
   holderEmail: string;
   disabledEmail: string;
+  disabledId: string;
   teardown: () => Promise<void>;
 };
 
@@ -192,6 +193,62 @@ describe("login / logout / sessions (real services)", () => {
     const legacyNoCookie = await app.inject({ method: "POST", url: "/logout" });
     expect(legacyNoCookie.body).toBe(withGarbage.body);
   });
+
+  it("GET /me returns id/email/role and never credential material (valid session)", async () => {
+    const login = await loginRequest(schema.holderEmail, password);
+    expect(login.statusCode).toBe(200);
+    const res = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: { cookie: `bv_session=${getCookieToken(login.headers["set-cookie"])}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.user).toEqual({
+      id: schema.holderId,
+      email: schema.holderEmail,
+      role: "ACCOUNT_HOLDER",
+    });
+    // The response surface carries NO credential/session material.
+    const serialised = res.body;
+    expect(serialised).not.toContain("token");
+    expect(serialised).not.toContain("tokenHash");
+    expect(serialised).not.toContain("sessionId");
+  });
+
+  it("GET /me: no cookie · expired · revoked · disabled user are all the single 401 (P5.4/P5.8)", async () => {
+    // 1) no cookie
+    const unauthed = await app.inject({ method: "GET", url: "/me" });
+    expect(unauthed.statusCode).toBe(401);
+    expect(unauthed.json().error.code).toBe("UNAUTHENTICATED");
+
+    // 2) expired session
+    const expiredToken = await independentSeedSession(schema.holderId, new Date(Date.now() - 1000));
+    const withExpired = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: { cookie: `bv_session=${expiredToken}` },
+    });
+    expect(withExpired.statusCode).toBe(401);
+
+    // 3) revoked session
+    const revokedToken = await independentSeedSession(schema.holderId, new Date(Date.now() + 600_000), true);
+    const withRevoked = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: { cookie: `bv_session=${revokedToken}` },
+    });
+    expect(withRevoked.statusCode).toBe(401);
+
+    // 4) a session whose USER is disabled — the session row itself is fine.
+    const disabledToken = await independentSeedSession(schema.disabledId, new Date(Date.now() + 600_000));
+    const withDisabled = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: { cookie: `bv_session=${disabledToken}` },
+    });
+    expect(withDisabled.statusCode).toBe(401);
+  });
 });
 
 describe("production cookie contract (COOKIE_SECURE=true)", () => {
@@ -253,10 +310,12 @@ async function seedFixtures(password: string): Promise<SeedSchema> {
     [holderEmail, passwordHash, disabledEmail],
   );
   const holder = rows.rows.find((r) => r.email === holderEmail)!;
+  const disabled = rows.rows.find((r) => r.email === disabledEmail)!;
   return {
     holderId: holder.id.toString(),
     holderEmail,
     disabledEmail,
+    disabledId: disabled.id.toString(),
     teardown: async () => {
       await closeIndependent(conn);
     },

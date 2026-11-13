@@ -119,6 +119,34 @@ export function registerAuthRoutes(
     },
   );
 
+  /**
+   * GET /me — the authenticated-user identity surface (PHASE-05 P5.4
+   * contract; requested explicitly by the product's auth checklist).
+   *
+   * The SAME `authenticate` preHandler as every protected route: a missing,
+   * expired or revoked cookie and a disabled user are all the single
+   * `401 UNAUTHENTICATED` refusal, resolved from the database — nothing is
+   * trusted from the client. The response carries id/email/role only: never
+   * the raw token, its hash, the session id, or any credential material.
+   */
+  app.get(
+    "/me",
+    { preHandler: [authenticate] },
+    async (request, reply) => {
+      if (!request.actor) throw new DomainError("UNAUTHENTICATED", "Authentication required.");
+      const user = await deps.prisma.user.findUnique({
+        where: { id: BigInt(request.actor.id) },
+        select: { id: true, email: true, role: true },
+      });
+      // The actor was resolved ACTIVE moments ago; a user deleted between the
+      // two reads (or disabled) is refused exactly like any other session.
+      if (!user) throw new DomainError("UNAUTHENTICATED", "Authentication required.");
+      return await reply.code(200).send({
+        user: { id: user.id.toString(), email: user.email, role: user.role },
+      });
+    },
+  );
+
   app.post(
     "/logout",
     {
