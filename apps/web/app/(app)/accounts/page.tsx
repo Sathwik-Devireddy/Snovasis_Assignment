@@ -12,21 +12,11 @@
  */
 
 import { apiGet } from "@/lib/api";
+import { balanceLabel, parseAccountList, type AccountRecord } from "@/lib/account-view";
 import { useEffect, useState } from "react";
 
-type Account = {
-  id: string;
-  account_number: string;
-  label: string;
-  currency_code: string;
-  kind: string;
-  status: string;
-  balance_minor: string | null;
-  event_last_seq: string | null;
-};
-
 export default function AccountsPage() {
-  const [accounts, setAccounts] = useState<Account[] | null>(null);
+  const [accounts, setAccounts] = useState<AccountRecord[] | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -35,7 +25,14 @@ export default function AccountsPage() {
     apiGet("/accounts")
       .then((data) => {
         if (cancelled) return;
-        setAccounts((data as { accounts?: Account[] }).accounts ?? []);
+        // Contract-pinned: the API returns camelCase accounts. A shape
+        // mismatch is an error, never a silently blank balance column.
+        const parsed = parseAccountList(data);
+        if (parsed === null) {
+          setError("The accounts response was not in the expected format.");
+          return;
+        }
+        setAccounts(parsed);
       })
       .catch((err: { statusCode?: number }) => {
         if (cancelled) return;
@@ -79,7 +76,7 @@ export default function AccountsPage() {
                 <td>{a.label}</td>
                 <td>{a.kind}</td>
                 <td>{a.status}</td>
-                <td className="mono">{a.balance_minor ?? "—"} {a.currency_code}</td>
+                <td className="mono">{balanceLabel(a)} {a.currencyCode}</td>
                 <td>
                   <a href={`/accounts/${a.id}`}>Detail</a>{" "}
                   <a href={`/accounts/${a.id}/statement`}>Statement</a>
