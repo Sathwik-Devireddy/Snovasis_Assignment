@@ -1,6 +1,6 @@
 # Phase 3 Final Report — Security, Release Readiness & Submission Preparation
 
-*Date: 2026-11-14 · Baseline: `main` @ `66f2b29` · Phase 3 work performed by the engineering agent under the owner's Phase 3 instruction*
+*Date: 2026-11-14 · Baseline: `main` @ `66f2b29` · Phase 3 work performed by the engineering agent under the owner's Phase 3 instruction · **Phase 3 documentation commit: `59a3203`** (this line was added in the immediate follow-up docs commit — a commit cannot reference its own hash)*
 
 ## 1. Initial repository state
 
