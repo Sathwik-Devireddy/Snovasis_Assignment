@@ -100,8 +100,8 @@ for the topology, the exact environment variables and the verification steps.
 ## Commands
 
 ```powershell
-npm test                             # API: 26 files / 200 tests against real PostgreSQL 17 + Redis
-npm run test --workspace apps/web    # web: 4 files / 41 tests
+npm test                             # API: 26 files / 202 tests against real PostgreSQL 17 + Redis
+npm run test --workspace apps/web    # web: 5 files / 48 tests
 npm run lint                         # both workspaces
 npm run typecheck                    # both workspaces
 npm run build --workspace apps/web   # production build (needs API_INTERNAL_URL)
@@ -129,11 +129,17 @@ Full reference: [`ledgerline-repo-kit/docs/DEPLOYMENT.md`](ledgerline-repo-kit/d
 
 ## Known limitations (honest list)
 
-1. **No production deployment yet** — the deployment steps are documented and
-   the compiled artefacts boot locally, but no public URL exists.
-2. **No browser end-to-end suite** — the API has 200 real-database tests and the
-   web tier has 41 unit tests; the user journey was verified manually through
-   the real proxy (register → login → accounts → deposit → statement → logout).
+1. **Production deposit journey is `BLOCKED — awaiting owner-controlled
+   real-admin bootstrap`** — production has no ADMIN yet; the one-time
+   first-admin slot is deliberately reserved for the owner's real
+   administrator (an intentional security decision, not a defect). Deposits
+   are ADMIN-only (H-2), so none can be posted in production until then.
+   Production verification was strictly non-destructive (health/readiness/
+   authentication probes; zero journals in production by design).
+2. **No browser end-to-end suite** — the API has 202 real-database tests and
+   the web tier has 48 unit tests; the user journey was verified manually
+   through the real proxy (register → login → accounts → deposit → statement
+   → logout) and re-probed non-destructively in Phase 3.
 3. **`postcss` advisories via `next@15.5.29`** — build-time only, no
    non-breaking fix exists (T-063, OPEN; owner decision required).
 4. **The T-042 attempt-write cap is best-effort**, not a strict hard cap (the
@@ -144,3 +150,27 @@ Full reference: [`ledgerline-repo-kit/docs/DEPLOYMENT.md`](ledgerline-repo-kit/d
    residual risk T-050.
 7. **`npm run format:check` reports pre-existing files** — prettier is not a CI
    gate; only files authored in the last pass are formatted.
+8. **Shared rate-limit buckets behind Render** — login/register limiter
+   buckets are IP-keyed and the API runs behind Render's router
+   (`trustProxy: false`), so all production clients share one bucket
+   (MEDIUM, availability-only; options recorded for the owner in
+   `SECURITY_REVIEW.md` §S-1).
+9. **The original challenge portal has not been checked** — submission
+   process verification remains an owner action
+   (`SUBMISSION_CHECKLIST.md` §1).
+
+## Phase 3 verification (2026-11-14)
+
+Final security review, financial-integrity probes on real accumulated history
+(7,348 journals: all balanced; conservation exact), full re-verification
+(202 API + 48 web tests, typecheck, lint, production build, migration
+idempotency), non-destructive production probes and the submission/
+interview/documentation package:
+
+- [`ledgerline-repo-kit/docs/PHASE_3_FINAL_REPORT.md`](ledgerline-repo-kit/docs/PHASE_3_FINAL_REPORT.md)
+- [`ledgerline-repo-kit/docs/SECURITY_REVIEW.md`](ledgerline-repo-kit/docs/SECURITY_REVIEW.md)
+- [`ledgerline-repo-kit/docs/FINANCIAL_INTEGRITY_EVIDENCE.md`](ledgerline-repo-kit/docs/FINANCIAL_INTEGRITY_EVIDENCE.md)
+- [`ledgerline-repo-kit/docs/REQUIREMENT_TRACEABILITY.md`](ledgerline-repo-kit/docs/REQUIREMENT_TRACEABILITY.md)
+- [`ledgerline-repo-kit/docs/DEMO_RUNBOOK.md`](ledgerline-repo-kit/docs/DEMO_RUNBOOK.md)
+- [`ledgerline-repo-kit/docs/SUBMISSION_CHECKLIST.md`](ledgerline-repo-kit/docs/SUBMISSION_CHECKLIST.md)
+- [`ledgerline-repo-kit/docs/INTERVIEW_PREPARATION.md`](ledgerline-repo-kit/docs/INTERVIEW_PREPARATION.md)

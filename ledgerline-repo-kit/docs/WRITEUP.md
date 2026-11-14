@@ -142,7 +142,7 @@ defect, how it was verified and the commit that fixed it.
   statement ordering, reconciliation conservation, audit atomicity under
   injected audit failure, eight adversarial API attacks and a 200-request load
   smoke that ends with the global invariants checked.
-- Web: **4 files / 41 tests** (money parsing, error classification, the
+- Web: **5 files / 48 tests** (money parsing, error classification, the
   intent/key model, logout outcome).
 - Mutation checks executed against the running database: three guards removed,
   the named test observed failing, every guard restored and re-verified green.
@@ -153,9 +153,16 @@ defect, how it was verified and the commit that fixed it.
 
 ## 6. Unfinished work
 
-1. **No production deployment yet** — the deployment steps and the environment
-   contract are documented and the artefacts boot locally, but there is no live
-   URL, no HTTPS and no verification "from outside your session".
+*Phase 3 status (2026-11-14) noted per item; full evidence in
+[`PHASE_3_FINAL_REPORT.md`](PHASE_3_FINAL_REPORT.md).*
+
+1. **Production deployment exists** (Phase 1 deployed it: Vercel + Render +
+   Neon + Upstash; `/health` and `/ready` return 200, re-verified non-
+   destructively in Phase 3). What remains is **role-complete production
+   coverage**: the deposit journey is
+   `BLOCKED — awaiting owner-controlled real-admin bootstrap` — the first-admin
+   slot is deliberately reserved; deposits are ADMIN-only (H-2), so production
+   has zero journals by design until the owner bootstraps their real admin.
 2. **No browser end-to-end suite** — the user journey was verified manually
    through the real proxy; a Playwright suite would make that repeatable.
 3. **T-063 (postcss advisories via `next@15.5.29`)** — build-time only; the
@@ -172,6 +179,19 @@ defect, how it was verified and the commit that fixed it.
 6. **The `LOGIN_FAILED` audit row is written best-effort** — a failure is
    logged and the uniform 401 is preserved, because degrading that envelope
    would be worse than losing the row.
+7. **Shared rate-limit buckets behind Render** (Phase 3 finding S-1, MEDIUM)
+   — availability-only concern; options recorded in
+   [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) for the owner.
+8. **The challenge portal/submission process has not been checked** — the
+   original specification is not in the repository; traceability maps to
+   [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md) and the portal check is an owner
+   action (`SUBMISSION_CHECKLIST.md` §1).
+
+Phase 3 additionally verified: 7,348 accumulated local journals all balanced,
+global conservation exact (customer total + clearing = 0), zero stored-vs-
+ledger divergence across 850 accounts, seed determinism (replay, no
+double-posting), migration idempotency, and the full test/build/CI matrix —
+see [`FINANCIAL_INTEGRITY_EVIDENCE.md`](FINANCIAL_INTEGRITY_EVIDENCE.md).
 
 ## 7. What a reviewer should try first
 

@@ -188,6 +188,37 @@ shutdown; the Fastify server stops accepting new connections first.
    intended loud failure.
 6. `docker compose logs api` → no repeated 500s.
 
+## 8a. Phase 3 deployment verification record (2026-11-14)
+
+Non-destructive production probes re-executed this phase (exact commands and
+results; no secret values anywhere):
+
+| Probe | Command | Expected → Observed |
+|---|---|---|
+| Render liveness | `curl.exe https://snovasis-assignment.onrender.com/health` | 200 `{"ok":true}` → **200** |
+| Render readiness | `curl.exe https://snovasis-assignment.onrender.com/ready` | 200, postgres+redis ok → **200** |
+| Unauthenticated identity | `curl.exe https://snovasis-assignment.onrender.com/me` | 401 uniform envelope → **401** |
+| Bad-credential login | `POST /login` with a correctly encoded body (temp file + `--data-binary`) | 401 `UNAUTHENTICATED` → **401** |
+| Vercel root | `curl.exe https://snovasis-assignment-seven.vercel.app` | 307 (redirect) → **307** |
+| Vercel login page | `…/login` | 200 → **200** |
+| Vercel→Render proxy | `…/api/me` | 401 uniform envelope → **401** |
+
+Method notes:
+- An inline-JSON login probe returning 400 was a **client-side artifact**
+  (PowerShell 5.1 mangling JSON passed to curl.exe); with the body in a file
+  the deployed API returns the uniform 401 exactly as the code specifies.
+- Production cookie flags were not re-exercised with a live login this phase
+  (no production credentials held): evidence = Phase 1 production
+  verification + this phase's code-level re-check of the config-checked
+  `cookieSecure` path (production boot requires `COOKIE_SECURE=true`).
+- Local migration idempotency re-verified: `node apps/api/scripts/migrate.mjs`
+  against Docker → "No migrations to run!", exit 0; `pgmigrations` = 0001–0006.
+
+**Production deposit journey status: `BLOCKED — awaiting owner-controlled
+real-admin bootstrap`** — the first-admin slot is deliberately reserved for
+the owner's real administrator; do not run the production bootstrap, create
+demo administrators, or insert transactions into production.
+
 ## 9. Secrets
 
 * `.env` is gitignored; only `.env.example` (placeholders) is committed.

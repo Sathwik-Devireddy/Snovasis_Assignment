@@ -1,5 +1,12 @@
 # Interview preparation: be able to answer these from your own code
 
+> **Phase 3 (2026-11-14):** the full question set (double-entry, balances,
+> concurrency, idempotency, sessions, RBAC, PostgreSQL, Redis, reconciliation,
+> DB permissions, timeout-after-commit) is now answered in
+> [`INTERVIEW_PREPARATION.md`](INTERVIEW_PREPARATION.md) — answers tied to the
+> actual code at the Phase 3 baseline. This file remains the live-drill table
+> with file:line references.
+
 Shortlisted candidates walk through the code and make a live change. Update the right-hand column with real file and line references as you build. If you cannot point at the code, you do not yet own it.
 
 | They will ask | You must be able to show | Where (fill in) |
