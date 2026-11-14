@@ -130,8 +130,10 @@ code lost); all verification ran without them.
 - Latest run at the Phase 3 baseline: **`43429125834` — success** on
   `66f2b29a…` (api job: lint+typecheck+bootstrap+migrate+test on real PG17/Redis
   services; web job: lint+typecheck+test+build).
-- After the Phase 3 docs commit, CI must be re-verified green before declaring
-  the gate complete (docs-only change; both jobs are expected green).
+- **Re-verified after the Phase 3 docs commits: run `43601656926` — success**
+  on `c4593c53…` (head of the Phase 3 documentation commits, both jobs green).
+  The final hash-recording edit after that run is docs-only; its own CI run on
+  `main` can be confirmed with `gh run list --limit 1`.
 
 ## 7. Deployment verification (non-destructive production probes)
 
